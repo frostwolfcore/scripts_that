@@ -1,177 +1,1225 @@
-local libraries = {
-    [ "entity" ] = "https://gamesense.pub/forums/viewtopic.php?id=27529",
-    [ "clipboard" ] = "https://gamesense.pub/forums/viewtopic.php?id=28678",
-    [ "base64" ] = "https://gamesense.pub/forums/viewtopic.php?id=21619",
-    [ "http" ] = "https://gamesense.pub/forums/viewtopic.php?id=19253"
+local vector = require 'vector'
+local c_entity = require 'gamesense/entity'
+local http = require 'gamesense/http'
+local base64 = require 'gamesense/base64'
+local clipboard = require 'gamesense/clipboard'
+local steamworks = require 'gamesense/steamworks'
+
+local client_set_event_callback, client_unset_event_callback = client.set_event_callback, client.unset_event_callback
+local entity_get_local_player, entity_get_player_weapon, entity_get_prop = entity.get_local_player, entity.get_player_weapon, entity.get_prop
+local ui_get, ui_set, ui_set_callback, ui_set_visible, ui_reference, ui_new_checkbox, ui_new_slider = ui.get, ui.set, ui.set_callback, ui.set_visible, ui.reference, ui.new_checkbox, ui.new_slider
+
+local reference = {
+    double_tap = {ui.reference('RAGE', 'Aimbot', 'Double tap')},
+    duck_peek_assist = ui.reference('RAGE', 'Other', 'Duck peek assist'),
+    pitch = {ui.reference('AA', 'Anti-aimbot angles', 'Pitch')},
+    yaw_base = ui.reference('AA', 'Anti-aimbot angles', 'Yaw base'),
+    yaw = {ui.reference('AA', 'Anti-aimbot angles', 'Yaw')},
+    yaw_jitter = {ui.reference('AA', 'Anti-aimbot angles', 'Yaw jitter')},
+    body_yaw = {ui.reference('AA', 'Anti-aimbot angles', 'Body yaw')},
+    freestanding_body_yaw = ui.reference('AA', 'anti-aimbot angles', 'Freestanding body yaw'),
+    edge_yaw = ui.reference('AA', 'Anti-aimbot angles', 'Edge yaw'),
+    freestanding = {ui.reference('AA', 'Anti-aimbot angles', 'Freestanding')},
+    roll = ui.reference('AA', 'Anti-aimbot angles', 'Roll'),
+    on_shot_anti_aim = {ui.reference('AA', 'Other', 'On shot anti-aim')},
+    slow_motion = {ui.reference('AA', 'Other', 'Slow motion')},
+    fakelag = {ui.reference('AA', 'Fake lag', 'Enabled')};
+    fakelag_amount = ui.reference('AA', 'Fake lag', 'Amount');
+    fakelag_variance = ui.reference('AA', 'Fake lag', 'Variance');
+    fakelag_limit = ui.reference('AA', 'Fake lag', 'Limit');
+    slow_motion = {ui.reference('AA', 'Other', 'Slow motion')};
+    leg_movement = ui.reference('AA', 'Other', 'Leg movement');
+    on_shot_anti_aim = {ui.reference('AA', 'Other', 'On shot anti-aim')};
+    fake_peek = {ui.reference('AA', 'Other', 'Fake peek')};
+};
+
+local globals_frametime = globals.frametime
+local globals_tickinterval = globals.tickinterval
+local entity_is_enemy = entity.is_enemy
+local entity_is_dormant = entity.is_dormant
+local entity_is_alive = entity.is_alive
+local entity_get_origin = entity.get_origin
+local entity_get_player_resource = entity.get_player_resource
+local table_insert = table.insert
+local math_floor = math.floor
+
+local last_press = 0
+local direction = 0
+local anti_aim_on_use_direction = 0
+local cheked_ticks = 0
+
+local E_POSE_PARAMETERS = {
+    STRAFE_YAW = 0,
+    STAND = 1,
+    LEAN_YAW = 2,
+    SPEED = 3,
+    LADDER_YAW = 4,
+    LADDER_SPEED = 5,
+    JUMP_FALL = 6,
+    MOVE_YAW = 7,
+    MOVE_BLEND_CROUCH = 8,
+    MOVE_BLEND_WALK = 9,
+    MOVE_BLEND_RUN = 10,
+    BODY_YAW = 11,
+    BODY_PITCH = 12,
+    AIM_BLEND_STAND_IDLE = 13,
+    AIM_BLEND_STAND_WALK = 14,
+    AIM_BLEND_STAND_RUN = 14,
+    AIM_BLEND_CROUCH_IDLE = 16,
+    AIM_BLEND_CROUCH_WALK = 17,
+    DEATH_YAW = 18
 }
 
-for library, link in pairs( libraries ) do
-    if not pcall( require, "gamesense/" .. library ) then
-        error( "syntech | Please subscribe to the following library: " .. link )
-    end
+local function contains(source, target)
+	for id, name in pairs(ui.get(source)) do
+		if name == target then
+			return true
+		end
+	end
+
+	return false
 end
 
+local function is_defensive(index)
+    cheked_ticks = math.max(entity.get_prop(index, 'm_nTickBase'), cheked_ticks or 0)
 
+    return math.abs(entity.get_prop(index, 'm_nTickBase') - cheked_ticks) > 2 and math.abs(entity.get_prop(index, 'm_nTickBase') - cheked_ticks) < 14
+end
 
-local vector = require "vector"
-local clipboard = require( "gamesense/clipboard" )
-local base64 = require( "gamesense/base64" )
-local http = require( "gamesense/http" )
-local entity_lib = require("gamesense/entity")
+local settings = {}
+local anti_aim_settings = {}
+local anti_aim_states = {'Global', 'Standing', 'Moving', 'Slow motion', 'Crouching', 'Crouching & moving', 'In air', 'In air & crouching', 'No exploits', 'On use'}
+local anti_aim_different = {'', ' ', '  ', '   ', '    ', '     ', '      ', '       ', '        ', '         '}
 
-local syntech = {
-    conditional_items = { },
-    updates = {
-        beta = {
-            "30.6.2023: Cant be fucked writing these anymore tbh"
-        },
-        live = {
-            "20.5.2023: Completely overhauled 'Randomize'",
-            "20.5.2023: Reworked crosshair indicators",
-            "19.5.2023: Ported most features from beta to live",
-            "12.5.2023: Updated Update Log."
-        }
+current_tab = ui.new_combobox('AA', 'Anti-aimbot angles', 'Tabs', {'Home', 'Anti-Aim', 'Keybinds'})
+local text1 = ui.new_label('AA', 'Anti-aimbot angles', ' ', 'string')
+local text2 = ui.new_label('AA', 'Anti-aimbot angles', 'S Y N C T E C H ~ RECODE', 'string')
+local text3 = ui.new_label('AA', 'Anti-aimbot angles', ' ', 'string')
+local text4 = ui.new_label('AA', 'Fake lag', 'Misc/Visuals')
+local text5 = ui.new_label('AA', 'Fake lag', '\aFFFFFF6F━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+local text6 = ui.new_label('AA', 'Fake lag', ' ')
+local text7 = ui.new_label('AA', 'Other', 'Animations')
+local text8 = ui.new_label('AA', 'Other', '\aFFFFFF6F━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+settings.anti_aim_state = ui.new_combobox('AA', 'Anti-aimbot angles', 'Anti-aimbot state', anti_aim_states) 
+
+local master_switch = ui.new_checkbox('AA', 'Fake lag', 'Log Aimbot Shots')
+local console_filter = ui.new_checkbox('AA', 'Fake lag', 'Console Filter')
+local anim_breakerx = ui.new_checkbox('AA', 'Other', 'Skeet leg fucker')
+local m_elements = ui.new_multiselect("AA", "Other", "Anim Breaker", {"earthquake", "airbreak", "kangaroo"})
+local force_safe_point = ui.reference('RAGE', 'Aimbot', 'Force safe point')
+local trashtalk = ui.new_checkbox('AA', 'Fake lag', 'Trash Talk')
+local clantagchanger = ui.new_checkbox('AA', 'Fake lag', 'Clan Tag')
+local fastladder = ui.new_checkbox('AA', 'Fake lag', 'Fast Ladder')
+local hitmarker = ui.new_checkbox('AA', 'Fake lag', '3D Hit Marker')
+
+local aspectratio = ui.new_slider('AA', 'Fake lag', 'Aspect Ratio', 0, 200, 0, true, nil, 0.01, {[0] = "Off"})
+
+local override_zoom_fov = ui_reference("Misc", "Miscellaneous", "Override zoom FOV")
+local cache = ui.get(override_zoom_fov)
+local scope_fov = ui_new_slider('AA', 'Fake lag', "Second Zoom FOV", -0, 100, 0, true, '%', 1, {[0] = "Off"})
+
+for i = 1, #anti_aim_states do
+    anti_aim_settings[i] = {
+        override_state = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Override ' .. string.lower(anti_aim_states[i])),
+        pitch1 = ui.new_combobox('AA', 'Anti-aimbot angles', 'Pitch' .. anti_aim_different[i], 'Off', 'Default', 'Up', 'Down', 'Minimal', 'Random', 'Custom'),
+        pitch2 = ui.new_slider('AA', 'Anti-aimbot angles', '\nPitch' .. anti_aim_different[i], -89, 89, 0, true, '°'),
+        yaw_base = ui.new_combobox('AA', 'Anti-aimbot angles', 'Yaw base' .. anti_aim_different[i], 'Local view', 'At targets'),
+        yaw1 = ui.new_combobox('AA', 'Anti-aimbot angles', 'Yaw' .. anti_aim_different[i], 'Off', '180', 'Spin', 'Static', '180 Z', 'Crosshair'),
+        yaw2_left = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw left' .. anti_aim_different[i], -180, 180, 0, true, '°'),
+        yaw2_right = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw right' .. anti_aim_different[i], -180, 180, 0, true, '°'),
+        yaw2_randomize = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw randomize' .. anti_aim_different[i], 0, 180, 0, true, '°'),
+        yaw_jitter1 = ui.new_combobox('AA', 'Anti-aimbot angles', 'Yaw jitter' .. anti_aim_different[i], 'Off', 'Offset', 'Center', 'Random', 'Skitter', 'Delay'),
+        yaw_jitter2_left = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw jitter left' .. anti_aim_different[i], -180, 180, 0, true, '°'),
+        yaw_jitter2_right = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw jitter right' .. anti_aim_different[i], -180, 180, 0, true, '°'),
+        yaw_jitter2_randomize = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw jitter randomize' .. anti_aim_different[i], 0, 180, 0, true, '°'),
+        yaw_jitter2_delay = ui.new_slider('AA', 'Anti-aimbot angles', 'Yaw jitter delay' .. anti_aim_different[i], 2, 10, 2, true, 't'),
+        body_yaw1 = ui.new_combobox('AA', 'Anti-aimbot angles', 'Body yaw' .. anti_aim_different[i], 'Off', 'Opposite', 'Jitter', 'Static'),
+        body_yaw2 = ui.new_slider('AA', 'Anti-aimbot angles', 'Body Yaw' .. anti_aim_different[i], -180, 180, 0, true, '°'),
+        freestanding_body_yaw = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Freestanding body yaw' .. anti_aim_different[i]),
+        roll = ui.new_slider('AA', 'Anti-aimbot angles', 'Roll' .. anti_aim_different[i], -45, 45, 0, true, '°'),
+        force_defensive = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Force defensive' .. anti_aim_different[i]),
+        defensive_anti_aimbot = ui.new_checkbox('AA', 'Anti-aimbot angles', '\aB6B665FF✥ Defensive AA' .. anti_aim_different[i]),
+        defensive_pitch = ui.new_checkbox('AA', 'Anti-aimbot angles', '\aB6B665FF· Pitch' .. anti_aim_different[i]),
+        defensive_pitch1 = ui.new_combobox('AA', 'Anti-aimbot angles', '\n· Pitch 2' .. anti_aim_different[i], 'Off', 'Default', 'Up', 'Down', 'Minimal', 'Random', 'Custom'),
+        defensive_pitch2 = ui.new_slider('AA', 'Anti-aimbot angles', '\n· Pitch 3' .. anti_aim_different[i], -89, 89, 0, true, '°'),
+        defensive_pitch3 = ui.new_slider('AA', 'Anti-aimbot angles', '\n· Pitch 4' .. anti_aim_different[i], -89, 89, 0, true, '°'),
+        defensive_yaw = ui.new_checkbox('AA', 'Anti-aimbot angles', '\aB6B665FF· Yaw' .. anti_aim_different[i]),
+        defensive_yaw1 = ui.new_combobox('AA', 'Anti-aimbot angles', '· Yaw 1' .. anti_aim_different[i], '180', 'Spin', '180 Z', 'Sideways', 'Random'),
+        defensive_yaw2 = ui.new_slider('AA', 'Anti-aimbot angles', '· Yaw 2' .. anti_aim_different[i], -180, 180, 0, true, '°')
+    }
+end
+
+settings.warmup_disabler = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Warmup disabler')
+settings.avoid_backstab = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Avoid backstab')
+settings.safe_head_in_air = ui.new_checkbox('AA', 'Anti-aimbot angles', 'Safe head in air')
+settings.manual_forward = ui.new_hotkey('AA', 'Anti-aimbot angles', 'Manual forward')
+settings.manual_right = ui.new_hotkey('AA', 'Anti-aimbot angles', 'Manual right')
+settings.manual_left = ui.new_hotkey('AA', 'Anti-aimbot angles', 'Manual left')
+settings.edge_yaw = ui.new_hotkey('AA', 'Anti-aimbot angles', 'Edge yaw')
+settings.freestanding = ui.new_hotkey('AA', 'Anti-aimbot angles', 'Freestanding')
+settings.freestanding_conditions = ui.new_multiselect('AA', 'Anti-aimbot angles', '\nFreestanding', 'Standing', 'Moving', 'Slow motion', 'Crouching', 'In air')
+settings.tweaks = ui.new_multiselect('AA', 'Anti-aimbot angles', '\nTweaks', 'Off jitter while freestanding', 'Off jitter on manual')
+
+local data = {
+    integers = {
+        settings.anti_aim_state,
+        anti_aim_settings[1].override_state, anti_aim_settings[2].override_state, anti_aim_settings[3].override_state, anti_aim_settings[4].override_state, anti_aim_settings[5].override_state, anti_aim_settings[6].override_state, anti_aim_settings[7].override_state, anti_aim_settings[8].override_state, anti_aim_settings[9].override_state, anti_aim_settings[10].override_state,
+        anti_aim_settings[1].force_defensive, anti_aim_settings[2].force_defensive, anti_aim_settings[3].force_defensive, anti_aim_settings[4].force_defensive, anti_aim_settings[5].force_defensive, anti_aim_settings[6].force_defensive, anti_aim_settings[7].force_defensive, anti_aim_settings[8].force_defensive, anti_aim_settings[9].force_defensive, anti_aim_settings[10].force_defensive,
+        anti_aim_settings[1].pitch1, anti_aim_settings[2].pitch1, anti_aim_settings[3].pitch1, anti_aim_settings[4].pitch1, anti_aim_settings[5].pitch1, anti_aim_settings[6].pitch1, anti_aim_settings[7].pitch1, anti_aim_settings[8].pitch1, anti_aim_settings[9].pitch1, anti_aim_settings[10].pitch1,
+        anti_aim_settings[1].pitch2, anti_aim_settings[2].pitch2, anti_aim_settings[3].pitch2, anti_aim_settings[4].pitch2, anti_aim_settings[5].pitch2, anti_aim_settings[6].pitch2, anti_aim_settings[7].pitch2, anti_aim_settings[8].pitch2, anti_aim_settings[9].pitch2, anti_aim_settings[10].pitch2,
+        anti_aim_settings[1].yaw_base, anti_aim_settings[2].yaw_base, anti_aim_settings[3].yaw_base, anti_aim_settings[4].yaw_base, anti_aim_settings[5].yaw_base, anti_aim_settings[6].yaw_base, anti_aim_settings[7].yaw_base, anti_aim_settings[8].yaw_base, anti_aim_settings[9].yaw_base, anti_aim_settings[10].yaw_base,
+        anti_aim_settings[1].yaw1, anti_aim_settings[2].yaw1, anti_aim_settings[3].yaw1, anti_aim_settings[4].yaw1, anti_aim_settings[5].yaw1, anti_aim_settings[6].yaw1, anti_aim_settings[7].yaw1, anti_aim_settings[8].yaw1, anti_aim_settings[9].yaw1, anti_aim_settings[10].yaw1,
+        anti_aim_settings[1].yaw2_left, anti_aim_settings[2].yaw2_left, anti_aim_settings[3].yaw2_left, anti_aim_settings[4].yaw2_left, anti_aim_settings[5].yaw2_left, anti_aim_settings[6].yaw2_left, anti_aim_settings[7].yaw2_left, anti_aim_settings[8].yaw2_left, anti_aim_settings[9].yaw2_left, anti_aim_settings[10].yaw2_left,
+        anti_aim_settings[1].yaw2_right, anti_aim_settings[2].yaw2_right, anti_aim_settings[3].yaw2_right, anti_aim_settings[4].yaw2_right, anti_aim_settings[5].yaw2_right, anti_aim_settings[6].yaw2_right, anti_aim_settings[7].yaw2_right, anti_aim_settings[8].yaw2_right, anti_aim_settings[9].yaw2_right, anti_aim_settings[10].yaw2_right,
+        anti_aim_settings[1].yaw2_randomize, anti_aim_settings[2].yaw2_randomize, anti_aim_settings[3].yaw2_randomize, anti_aim_settings[4].yaw2_randomize, anti_aim_settings[5].yaw2_randomize, anti_aim_settings[6].yaw2_randomize, anti_aim_settings[7].yaw2_randomize, anti_aim_settings[8].yaw2_randomize, anti_aim_settings[9].yaw2_randomize, anti_aim_settings[10].yaw2_randomize,
+        anti_aim_settings[1].yaw_jitter1, anti_aim_settings[2].yaw_jitter1, anti_aim_settings[3].yaw_jitter1, anti_aim_settings[4].yaw_jitter1, anti_aim_settings[5].yaw_jitter1, anti_aim_settings[6].yaw_jitter1, anti_aim_settings[7].yaw_jitter1, anti_aim_settings[8].yaw_jitter1, anti_aim_settings[9].yaw_jitter1, anti_aim_settings[10].yaw_jitter1,
+        anti_aim_settings[1].yaw_jitter2_left, anti_aim_settings[2].yaw_jitter2_left, anti_aim_settings[3].yaw_jitter2_left, anti_aim_settings[4].yaw_jitter2_left, anti_aim_settings[5].yaw_jitter2_left, anti_aim_settings[6].yaw_jitter2_left, anti_aim_settings[7].yaw_jitter2_left, anti_aim_settings[8].yaw_jitter2_left, anti_aim_settings[9].yaw_jitter2_left, anti_aim_settings[10].yaw_jitter2_left,
+        anti_aim_settings[1].yaw_jitter2_right, anti_aim_settings[2].yaw_jitter2_right, anti_aim_settings[3].yaw_jitter2_right, anti_aim_settings[4].yaw_jitter2_right, anti_aim_settings[5].yaw_jitter2_right, anti_aim_settings[6].yaw_jitter2_right, anti_aim_settings[7].yaw_jitter2_right, anti_aim_settings[8].yaw_jitter2_right, anti_aim_settings[9].yaw_jitter2_right, anti_aim_settings[10].yaw_jitter2_right,
+        anti_aim_settings[1].yaw_jitter2_randomize, anti_aim_settings[2].yaw_jitter2_randomize, anti_aim_settings[3].yaw_jitter2_randomize, anti_aim_settings[4].yaw_jitter2_randomize, anti_aim_settings[5].yaw_jitter2_randomize, anti_aim_settings[6].yaw_jitter2_randomize, anti_aim_settings[7].yaw_jitter2_randomize, anti_aim_settings[8].yaw_jitter2_randomize, anti_aim_settings[9].yaw_jitter2_randomize, anti_aim_settings[10].yaw_jitter2_randomize,
+        anti_aim_settings[1].yaw_jitter2_delay, anti_aim_settings[2].yaw_jitter2_delay, anti_aim_settings[3].yaw_jitter2_delay, anti_aim_settings[4].yaw_jitter2_delay, anti_aim_settings[5].yaw_jitter2_delay, anti_aim_settings[6].yaw_jitter2_delay, anti_aim_settings[7].yaw_jitter2_delay, anti_aim_settings[8].yaw_jitter2_delay, anti_aim_settings[9].yaw_jitter2_delay, anti_aim_settings[10].yaw_jitter2_delay,
+        anti_aim_settings[1].body_yaw1, anti_aim_settings[2].body_yaw1, anti_aim_settings[3].body_yaw1, anti_aim_settings[4].body_yaw1, anti_aim_settings[5].body_yaw1, anti_aim_settings[6].body_yaw1, anti_aim_settings[7].body_yaw1, anti_aim_settings[8].body_yaw1, anti_aim_settings[9].body_yaw1, anti_aim_settings[10].body_yaw1,
+        anti_aim_settings[1].body_yaw2, anti_aim_settings[2].body_yaw2, anti_aim_settings[3].body_yaw2, anti_aim_settings[4].body_yaw2, anti_aim_settings[5].body_yaw2, anti_aim_settings[6].body_yaw2, anti_aim_settings[7].body_yaw2, anti_aim_settings[8].body_yaw2, anti_aim_settings[9].body_yaw2, anti_aim_settings[10].body_yaw2,
+        anti_aim_settings[1].freestanding_body_yaw, anti_aim_settings[2].freestanding_body_yaw, anti_aim_settings[3].freestanding_body_yaw, anti_aim_settings[4].freestanding_body_yaw, anti_aim_settings[5].freestanding_body_yaw, anti_aim_settings[6].freestanding_body_yaw, anti_aim_settings[7].freestanding_body_yaw, anti_aim_settings[8].freestanding_body_yaw, anti_aim_settings[9].freestanding_body_yaw, anti_aim_settings[10].freestanding_body_yaw,
+        anti_aim_settings[1].roll, anti_aim_settings[2].roll, anti_aim_settings[3].roll, anti_aim_settings[4].roll, anti_aim_settings[5].roll, anti_aim_settings[6].roll, anti_aim_settings[7].roll, anti_aim_settings[8].roll, anti_aim_settings[9].roll, anti_aim_settings[10].roll,
+        anti_aim_settings[1].defensive_anti_aimbot, anti_aim_settings[2].defensive_anti_aimbot, anti_aim_settings[3].defensive_anti_aimbot, anti_aim_settings[4].defensive_anti_aimbot, anti_aim_settings[5].defensive_anti_aimbot, anti_aim_settings[6].defensive_anti_aimbot, anti_aim_settings[7].defensive_anti_aimbot, anti_aim_settings[8].defensive_anti_aimbot, anti_aim_settings[9].defensive_anti_aimbot, anti_aim_settings[10].defensive_anti_aimbot,
+        anti_aim_settings[1].defensive_pitch, anti_aim_settings[2].defensive_pitch, anti_aim_settings[3].defensive_pitch, anti_aim_settings[4].defensive_pitch, anti_aim_settings[5].defensive_pitch, anti_aim_settings[6].defensive_pitch, anti_aim_settings[7].defensive_pitch, anti_aim_settings[8].defensive_pitch, anti_aim_settings[9].defensive_pitch, anti_aim_settings[10].defensive_pitch,
+        anti_aim_settings[1].defensive_pitch1, anti_aim_settings[2].defensive_pitch1, anti_aim_settings[3].defensive_pitch1, anti_aim_settings[4].defensive_pitch1, anti_aim_settings[5].defensive_pitch1, anti_aim_settings[6].defensive_pitch1, anti_aim_settings[7].defensive_pitch1, anti_aim_settings[8].defensive_pitch1, anti_aim_settings[9].defensive_pitch1, anti_aim_settings[10].defensive_pitch1,
+        anti_aim_settings[1].defensive_pitch2, anti_aim_settings[2].defensive_pitch2, anti_aim_settings[3].defensive_pitch2, anti_aim_settings[4].defensive_pitch2, anti_aim_settings[5].defensive_pitch2, anti_aim_settings[6].defensive_pitch2, anti_aim_settings[7].defensive_pitch2, anti_aim_settings[8].defensive_pitch2, anti_aim_settings[9].defensive_pitch2, anti_aim_settings[10].defensive_pitch2,
+        anti_aim_settings[1].defensive_pitch3, anti_aim_settings[2].defensive_pitch3, anti_aim_settings[3].defensive_pitch3, anti_aim_settings[4].defensive_pitch3, anti_aim_settings[5].defensive_pitch3, anti_aim_settings[6].defensive_pitch3, anti_aim_settings[7].defensive_pitch3, anti_aim_settings[8].defensive_pitch3, anti_aim_settings[9].defensive_pitch3, anti_aim_settings[10].defensive_pitch3,
+        anti_aim_settings[1].defensive_yaw, anti_aim_settings[2].defensive_yaw, anti_aim_settings[3].defensive_yaw, anti_aim_settings[4].defensive_yaw, anti_aim_settings[5].defensive_yaw, anti_aim_settings[6].defensive_yaw, anti_aim_settings[7].defensive_yaw, anti_aim_settings[8].defensive_yaw, anti_aim_settings[9].defensive_yaw, anti_aim_settings[10].defensive_yaw,
+        anti_aim_settings[1].defensive_yaw1, anti_aim_settings[2].defensive_yaw1, anti_aim_settings[3].defensive_yaw1, anti_aim_settings[4].defensive_yaw1, anti_aim_settings[5].defensive_yaw1, anti_aim_settings[6].defensive_yaw1, anti_aim_settings[7].defensive_yaw1, anti_aim_settings[8].defensive_yaw1, anti_aim_settings[9].defensive_yaw1, anti_aim_settings[10].defensive_yaw1,
+        anti_aim_settings[1].defensive_yaw2, anti_aim_settings[2].defensive_yaw2, anti_aim_settings[3].defensive_yaw2, anti_aim_settings[4].defensive_yaw2, anti_aim_settings[5].defensive_yaw2, anti_aim_settings[6].defensive_yaw2, anti_aim_settings[7].defensive_yaw2, anti_aim_settings[8].defensive_yaw2, anti_aim_settings[9].defensive_yaw2, anti_aim_settings[10].defensive_yaw2,
+        settings.avoid_backstab,
+        settings.safe_head_in_air,
+        settings.freestanding_conditions,
+        settings.tweaks, master_switch, console_filter, anim_breakerx, scope_fov, trashtalk, aspectratio, hitmarker, fastladder, clantagchanger, settings.warmup_disabler
     }
 }
 
+local function import(text)
+    local status, config =
+        pcall(
+        function()
+            return json.parse(base64.decode(text))
+        end
+    )
 
-
-function syntech.new_menu_item( o_function, name, group, conditions, ... )
-    local item = o_function( "AA", group ~= nil and group or "Anti-aimbot angles", name, ... )
-
-    if conditions ~= nil then
-        syntech.conditional_items[ item ] = conditions
+    if not status or status == nil then
+        client.color_log(255, 0, 0, "[syntech]\0")
+	    client.color_log(200, 200, 200, " error while importing!")
+        return
     end
 
-    return item
-end
+    if config ~= nil then
+        for k, v in pairs(config) do
+            k = ({[1] = 'integers'})[k]
 
-function syntech.lerp_color( first_color, second_color, factor )
-    local new_color = { }
-    for i=1, #first_color do
-        new_color[ i ] = first_color[ i ] + ( second_color[ i ] - first_color [ i ] ) * factor
-    end
-    return new_color
-end
-
-function syntech.print( ... )
-    client.color_log( 165, 170, 255, "syntech \0" )
-    client.color_log( 255, 255, 255, "| ", ... )
-end
-
-function syntech.gradient_text( color, color_alt, text )
-    local final_text = ""
-    local text_len = #text-1
-
-    local increments = { }
-    for i=1, 4 do
-        increments[ i ] = ( color_alt[ i ] - color[ i ] ) / text_len
-    end
-
-    for i=1, text_len+1 do
-        final_text = final_text .. string.format( "\a%02x%02x%02x%02x%s", color[ 1 ], color[ 2 ], color[ 3 ], color[ 4 ], text:sub( i, i ) )
-
-        for i=1, 4 do
-            color[ i ] = color[ i ] + increments[ i ]
+            for k2, v2 in pairs(v) do
+                if k == 'integers' then
+                    ui.set(data[k][k2], v2)
+                end
+            end
         end
     end
 
-    return final_text
+    client.color_log(124, 252, 0, "[syntech]\0")
+	client.color_log(200, 200, 200, " config successfully imported!")
+
 end
 
+client.set_event_callback('setup_command', function(cmd)
+    local self = entity.get_local_player()
 
-function syntech.alt_gradient_text(r1, g1, b1, a1, r2, g2, b2, a2, m)
-    local output = ''
-    local len = #m
-    local rinc = (r2 - r1) / len
-    local ginc = (g2 - g1) / len
-    local binc = (b2 - b1) / len
-    local ainc = (a2 - a1) / len
+    if entity.get_player_weapon(self) == nil then return end
 
-    for i=1, len do
-        output = output .. ('\a%02x%02x%02x%02x%s'):format(r1, g1, b1, a1, m:sub(i, i))
-        r1 = r1 + rinc
-        g1 = g1 + ginc
-        b1 = b1 + binc
-        a1 = a1 + ainc
+    local using = false
+    local anti_aim_on_use = false
+
+    local inverted = entity.get_prop(self, "m_flPoseParameter", 11) * 120 - 60
+
+    local is_planting = entity.get_prop(self, 'm_bInBombZone') == 1 and entity.get_classname(entity.get_player_weapon(self)) == 'CC4' and entity.get_prop(self, 'm_iTeamNum') == 2
+    local CPlantedC4 = entity.get_all('CPlantedC4')[1]
+
+    local eye_x, eye_y, eye_z = client.eye_position()
+	local pitch, yaw = client.camera_angles()
+
+    local sin_pitch = math.sin(math.rad(pitch))
+	local cos_pitch = math.cos(math.rad(pitch))
+
+	local sin_yaw = math.sin(math.rad(yaw))
+	local cos_yaw = math.cos(math.rad(yaw))
+
+    local direction_vector = {cos_pitch * cos_yaw, cos_pitch * sin_yaw, -sin_pitch}
+
+    local fraction, entity_index = client.trace_line(self, eye_x, eye_y, eye_z, eye_x + (direction_vector[1] * 8192), eye_y + (direction_vector[2] * 8192), eye_z + (direction_vector[3] * 8192))
+
+    if CPlantedC4 ~= nil then
+        dist_to_c4 = vector(entity.get_prop(self, 'm_vecOrigin')):dist(vector(entity.get_prop(CPlantedC4, 'm_vecOrigin')))
+
+        if entity.get_prop(CPlantedC4, 'm_bBombDefused') == 1 then dist_to_c4 = 56 end
+
+        is_defusing = dist_to_c4 < 56 and entity.get_prop(self, 'm_iTeamNum') == 3
     end
-    return output
-end
 
-local animate = (function()
-    local anim = {}
-
-    local lerp = function(start, vend)
-        return start + (vend - start) * (globals.frametime() * 6)
+    if entity_index ~= -1 then
+        if vector(entity.get_prop(self, 'm_vecOrigin')):dist(vector(entity.get_prop(entity_index, 'm_vecOrigin'))) < 146 then
+            using = entity.get_classname(entity_index) ~= 'CWorld' and entity.get_classname(entity_index) ~= 'CFuncBrush' and entity.get_classname(entity_index) ~= 'CCSPlayer'
+        end
     end
 
-    local lerp_notify = function(start, vend)
-        return start + (vend - start) * (globals.frametime() * 8)
-    end
+    if cmd.in_use == 1 and not using and not is_planting and not is_defusing and ui.get(anti_aim_settings[10].override_state) then cmd.buttons = bit.band(cmd.buttons, bit.bnot(bit.lshift(1, 5))); anti_aim_on_use = true; state_id = 10 else if (ui.get(reference.double_tap[1]) and ui.get(reference.double_tap[2])) == false and (ui.get(reference.on_shot_anti_aim[1]) and ui.get(reference.on_shot_anti_aim[2])) == false and ui.get(anti_aim_settings[9].override_state) then anti_aim_on_use = false; state_id = 9 else if (cmd.in_jump == 1 or bit.band(entity.get_prop(self, 'm_fFlags'), 1) == 0) and entity.get_prop(self, 'm_flDuckAmount') > 0.8 and ui.get(anti_aim_settings[8].override_state) then anti_aim_on_use = false; state_id = 8 elseif (cmd.in_jump == 1 or bit.band(entity.get_prop(self, 'm_fFlags'), 1) == 0) and entity.get_prop(self, 'm_flDuckAmount') < 0.8 and ui.get(anti_aim_settings[7].override_state) then anti_aim_on_use = false; state_id = 7 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and (entity.get_prop(self, 'm_flDuckAmount') > 0.8 or ui.get(reference.duck_peek_assist)) and vector(entity.get_prop(self, 'm_vecVelocity')):length() > 2 and ui.get(anti_aim_settings[6].override_state) then anti_aim_on_use = false; state_id = 6 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and entity.get_prop(self, 'm_flDuckAmount') > 0.8 and vector(entity.get_prop(self, 'm_vecVelocity')):length() < 2 and ui.get(anti_aim_settings[5].override_state) then anti_aim_on_use = false; state_id = 5 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() > 2 and entity.get_prop(self, 'm_flDuckAmount') < 0.8 and (ui.get(reference.slow_motion[1]) and ui.get(reference.slow_motion[2])) == true and ui.get(anti_aim_settings[4].override_state) then anti_aim_on_use = false; state_id = 4 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() > 2 and entity.get_prop(self, 'm_flDuckAmount') < 0.8 and (ui.get(reference.slow_motion[1]) and ui.get(reference.slow_motion[2])) == false and ui.get(anti_aim_settings[3].override_state) then anti_aim_on_use = false; state_id = 3 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() < 2 and entity.get_prop(self, 'm_flDuckAmount') < 0.8 and ui.get(anti_aim_settings[2].override_state) then anti_aim_on_use = false; state_id = 2 else anti_aim_on_use = false; state_id = 1 end end end
+    if cmd.in_jump == 1 or bit.band(entity.get_prop(self, 'm_fFlags'), 1) == 0 then freestanding_state_id = 5 elseif (entity.get_prop(self, 'm_flDuckAmount') > 0.8 or ui.get(reference.duck_peek_assist)) and bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 then freestanding_state_id = 4 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() > 2 and (ui.get(reference.slow_motion[1]) and ui.get(reference.slow_motion[2])) == true then freestanding_state_id = 3 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() > 2 and (ui.get(reference.slow_motion[1]) and ui.get(reference.slow_motion[2])) == false then freestanding_state_id = 2 elseif bit.band(entity.get_prop(self, 'm_fFlags'), 1) ~= 0 and vector(entity.get_prop(self, 'm_vecVelocity')):length() < 2 then freestanding_state_id = 1 end
 
-    anim.new_notify = function(value, startpos, endpos, condition)
-        if condition ~= nil then
-            if condition then
-                return lerp_notify(value,startpos)
-            else
-                return lerp_notify(value,endpos)
+    ui.set(settings.manual_forward, 'On hotkey')
+    ui.set(settings.manual_right, 'On hotkey')
+    ui.set(settings.manual_left, 'On hotkey')
+
+    cmd.force_defensive = ui.get(anti_aim_settings[state_id].force_defensive)
+
+    ui.set(reference.pitch[1], ui.get(anti_aim_settings[state_id].pitch1))
+    ui.set(reference.pitch[2], ui.get(anti_aim_settings[state_id].pitch2))
+    ui.set(reference.yaw_base, (direction == 180 or direction == 90 or direction == -90) and anti_aim_on_use == false and 'Local view' or ui.get(anti_aim_settings[state_id].yaw_base))
+    ui.set(reference.yaw[1], (direction == 180 or direction == 90 or direction == -90) and anti_aim_on_use == false and '180' or ui.get(anti_aim_settings[state_id].yaw1))
+
+    if ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' then
+        if inverted > 0 then
+            if ui.get(settings.manual_left) and last_press + 0.2 < globals.realtime() then
+                direction = direction == -90 and ui.get(anti_aim_settings[state_id].yaw_jitter2_left) or -90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_right) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 90 and ui.get(anti_aim_settings[state_id].yaw_jitter2_left) or 90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_forward) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 180 and ui.get(anti_aim_settings[state_id].yaw_jitter2_left) or 180
+
+                last_press = globals.realtime()
             end
         else
-            return lerp_notify(value,startpos)
-        end
-    end
+            if ui.get(settings.manual_left) and last_press + 0.2 < globals.realtime() then
+                direction = direction == -90 and ui.get(anti_aim_settings[state_id].yaw_jitter2_right) or -90
 
-    anim.new = function(value, startpos, endpos, condition)
-        if condition ~= nil then
-            if condition then
-                return lerp(value,startpos)
-            else
-                return lerp(value,endpos)
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_right) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 90 and ui.get(anti_aim_settings[state_id].yaw_jitter2_right) or 90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_forward) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 180 and ui.get(anti_aim_settings[state_id].yaw_jitter2_right) or 180
+
+                last_press = globals.realtime()
+            end
+        end
+    else
+        if inverted > 0 then
+            if ui.get(settings.manual_left) and last_press + 0.2 < globals.realtime() then
+                direction = direction == -90 and ui.get(anti_aim_settings[state_id].yaw2_left) or -90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_right) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 90 and ui.get(anti_aim_settings[state_id].yaw2_left) or 90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_forward) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 180 and ui.get(anti_aim_settings[state_id].yaw2_left) or 180
+
+                last_press = globals.realtime()
             end
         else
-            return lerp(value,startpos)
+            if ui.get(settings.manual_left) and last_press + 0.2 < globals.realtime() then
+                direction = direction == -90 and ui.get(anti_aim_settings[state_id].yaw2_right) or -90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_right) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 90 and ui.get(anti_aim_settings[state_id].yaw2_right) or 90
+
+                last_press = globals.realtime()
+            elseif ui.get(settings.manual_forward) and last_press + 0.2 < globals.realtime() then
+                direction = direction == 180 and ui.get(anti_aim_settings[state_id].yaw2_right) or 180
+
+                last_press = globals.realtime()
+            end
         end
     end
 
-    anim.color_lerp = function(color, color2, end_value, condition)
-        if condition ~= nil then
-            if condition then
-                color.r = lerp(color.r,color2.r)
-                color.g = lerp(color.g,color2.g)
-                color.b = lerp(color.b,color2.b)
-                color.a = lerp(color.a,color2.a)
+    if ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' then
+        if math.random(0, 1) ~= 0 then
+            yaw_jitter2_left = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+            yaw_jitter2_right = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+        else
+            yaw_jitter2_left = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+            yaw_jitter2_right = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+        end
+
+        if inverted > 0 then
+            if yaw_jitter2_left == 180 then yaw_jitter2_left = -180 elseif yaw_jitter2_left == 90 then yaw_jitter2_left = 89 elseif yaw_jitter2_left == -90 then yaw_jitter2_left = -89 end
+
+            if not (direction == 180 or direction == 90 or direction == -90) then direction = yaw_jitter2_left end
+        else
+            if yaw_jitter2_right == 180 then yaw_jitter2_right = -180 elseif yaw_jitter2_right == 90 then yaw_jitter2_right = 89 elseif yaw_jitter2_right == -90 then yaw_jitter2_right = -89 end
+
+            if not (direction == 180 or direction == 90 or direction == -90) then direction = yaw_jitter2_right end
+        end
+    else
+        if inverted > 0 then
+            if math.random(0, 1) ~= 0 then yaw2_left = ui.get(anti_aim_settings[state_id].yaw2_left) - math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize)) else yaw2_left = ui.get(anti_aim_settings[state_id].yaw2_left) + math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize)) end
+
+            if yaw2_left == 180 then yaw2_left = -180 elseif yaw2_left == 90 then yaw2_left = 89 elseif yaw2_left == -90 then yaw2_left = -89 end
+
+            if not (direction == 90 or direction == -90 or direction == 180) then direction = yaw2_left end
+        else
+            if math.random(0, 1) ~= 0 then yaw2_right = ui.get(anti_aim_settings[state_id].yaw2_right) - math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize)) else yaw2_right = ui.get(anti_aim_settings[state_id].yaw2_right) + math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize)) end
+
+            if yaw2_right == 180 then yaw2_right = -180 elseif yaw2_right == 90 then yaw2_right = 89 elseif yaw2_right == -90 then yaw2_right = -89 end
+
+            if not (direction == 90 or direction == -90 or direction == 180) then direction = yaw2_right end
+        end
+    end
+
+    if anti_aim_on_use == true then
+        if ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' then
+            if inverted > 0 then
+                if math.random(0, 1) ~= 0 then
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+                else
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+                end
             else
-                color.r = lerp(color.r,end_value.r)
-                color.g = lerp(color.g,end_value.g)
-                color.b = lerp(color.b,end_value.b)
-                color.a = lerp(color.a,end_value.a)
+                if math.random(0, 1) ~= 0 then
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+                else
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize))
+                end
             end
         else
-            color.r = lerp(color.r,color2.r)
-            color.g = lerp(color.g,color2.g)
-            color.b = lerp(color.b,color2.b)
-            color.a = lerp(color.a,color2.a)
+            if inverted > 0 then
+                if math.random(0, 1) ~= 0 then
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw2_left) - math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize))
+                else
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw2_left) + math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize))
+                end
+            else
+                if math.random(0, 1) ~= 0 then
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw2_right) - math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize))
+                else
+                    anti_aim_on_use_direction = ui.get(anti_aim_settings[state_id].yaw2_right) + math.random(0, ui.get(anti_aim_settings[state_id].yaw2_randomize))
+                end
+            end
         end
-        return { r = color.r , g = color.g , b = color.b , a = color.a }
     end
 
-    anim.adapting = function(cur, min, max, target, step, speed)
-        local step = step or 1
-        local speed = speed or 0.1
+    if direction > 180 or direction < -180 then direction = -180 end
+    if anti_aim_on_use_direction > 180 or anti_aim_on_use_direction < -180 then anti_aim_on_use_direction = -180 end
 
-        if cur < min + step then
-            target = max
-        elseif cur > max - step then
-            target = min
-        end
-        return cur + (target - cur) * speed * (globals.absoluteframetime() * 10)
+    ui.set(reference.yaw[2], anti_aim_on_use == false and direction or anti_aim_on_use_direction)
+    ui.set(reference.yaw_jitter[1], ((direction == 180 or direction == 90 or direction == -90) and contains(settings.tweaks, 'Off jitter on manual') and anti_aim_on_use == false or ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' or ui.get(anti_aim_settings[state_id].yaw1) == 'Off') and 'Off' or ui.get(anti_aim_settings[state_id].yaw_jitter1))
+
+    if inverted > 0 then
+        if math.random(0, 1) ~= 0 then yaw_jitter2_left = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize)) else yaw_jitter2_left = ui.get(anti_aim_settings[state_id].yaw_jitter2_left) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize)) end
+
+        if yaw_jitter2_left > 180 or yaw_jitter2_left < -180 then yaw_jitter2_left = -180 end
+
+        ui.set(reference.yaw_jitter[2], ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and yaw_jitter2_left or 0)
+    else
+        if math.random(0, 1) ~= 0 then yaw_jitter2_right = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) - math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize)) else yaw_jitter2_right = ui.get(anti_aim_settings[state_id].yaw_jitter2_right) + math.random(0, ui.get(anti_aim_settings[state_id].yaw_jitter2_randomize)) end
+
+        if yaw_jitter2_right > 180 or yaw_jitter2_right < -180 then yaw_jitter2_right = -180 end
+
+        ui.set(reference.yaw_jitter[2], ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and yaw_jitter2_right or 0)
     end
-    return anim
-end)()
 
-local function includes( table, key )
-    for i=1, #table do
-        if table[ i ] == key then
+    if ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' then
+        if (ui.get(reference.double_tap[1]) and ui.get(reference.double_tap[2])) == true or (ui.get(reference.on_shot_anti_aim[1]) and ui.get(reference.on_shot_anti_aim[2])) == true then
+            ui.set(reference.body_yaw[1], (direction == 180 or direction == 90 or direction == -90) and contains(settings.tweaks, 'Off jitter on manual') and anti_aim_on_use == false and 'Opposite' or 'Static')
+        else
+            ui.set(reference.body_yaw[1], (direction == 180 or direction == 90 or direction == -90) and contains(settings.tweaks, 'Off jitter on manual') and anti_aim_on_use == false and 'Opposite' or 'Jitter')
+        end
+    else
+        ui.set(reference.body_yaw[1], (direction == 180 or direction == 90 or direction == -90) and contains(settings.tweaks, 'Off jitter on manual') and anti_aim_on_use == false and 'Opposite' or ui.get(anti_aim_settings[state_id].body_yaw1))
+    end
+
+    if cmd.command_number % ui.get(anti_aim_settings[state_id].yaw_jitter2_delay) + 1 > ui.get(anti_aim_settings[state_id].yaw_jitter2_delay) - 1 then
+        delayed_jitter = not delayed_jitter
+    end
+
+    if ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' then
+        if (ui.get(reference.double_tap[1]) and ui.get(reference.double_tap[2])) == true or (ui.get(reference.on_shot_anti_aim[1]) and ui.get(reference.on_shot_anti_aim[2])) == true then
+            ui.set(reference.body_yaw[2], delayed_jitter and -90 or 90)
+        else
+            ui.set(reference.body_yaw[2], -40)
+        end
+    else
+        ui.set(reference.body_yaw[2], ui.get(anti_aim_settings[state_id].body_yaw2))
+    end
+
+    ui.set(reference.freestanding_body_yaw, ui.get(anti_aim_settings[state_id].yaw1) ~= 'Off' and ui.get(anti_aim_settings[state_id].yaw_jitter1) == 'Delay' and false or ui.get(anti_aim_settings[state_id].freestanding_body_yaw))
+    ui.set(reference.roll, ui.get(anti_aim_settings[state_id].roll))
+
+    if ui.get(anti_aim_settings[state_id].defensive_anti_aimbot) and is_defensive_active and ((ui.get(reference.double_tap[1]) and ui.get(reference.double_tap[2])) or (ui.get(reference.on_shot_anti_aim[1]) and ui.get(reference.on_shot_anti_aim[2]))) and not (direction == 180 or direction == 90 or direction == -90) then
+        if ui.get(anti_aim_settings[state_id].defensive_pitch) then
+            ui.set(reference.pitch[1], ui.get(anti_aim_settings[state_id].defensive_pitch1))
+
+            if ui.get(anti_aim_settings[state_id].defensive_pitch1) == 'Random' then
+                ui.set(reference.pitch[1], 'Custom')
+                ui.set(reference.pitch[2], math.random(ui.get(anti_aim_settings[state_id].defensive_pitch2), ui.get(anti_aim_settings[state_id].defensive_pitch3)))
+            else
+                ui.set(reference.pitch[2], ui.get(anti_aim_settings[state_id].defensive_pitch2))
+            end
+        end
+
+        if ui.get(anti_aim_settings[state_id].defensive_yaw) then
+            ui.set(reference.yaw_jitter[1], 'Off')
+            ui.set(reference.body_yaw[1], 'Opposite')
+
+            if ui.get(anti_aim_settings[state_id].defensive_yaw1) == '180' then
+                ui.set(reference.yaw[1], '180')
+
+                ui.set(reference.yaw[2], ui.get(anti_aim_settings[state_id].defensive_yaw2))
+            elseif ui.get(anti_aim_settings[state_id].defensive_yaw1) == 'Spin' then
+                ui.set(reference.yaw[1], 'Spin')
+
+                ui.set(reference.yaw[2], ui.get(anti_aim_settings[state_id].defensive_yaw2))
+            elseif ui.get(anti_aim_settings[state_id].defensive_yaw1) == '180 Z' then
+                ui.set(reference.yaw[1], '180 Z')
+
+                ui.set(reference.yaw[2], ui.get(anti_aim_settings[state_id].defensive_yaw2))
+            elseif ui.get(anti_aim_settings[state_id].defensive_yaw1) == 'Sideways' then
+                ui.set(reference.yaw[1], '180')
+
+                if cmd.command_number % 4 >= 2 then
+                    ui.set(reference.yaw[2], math.random(85, 100))
+                else
+                    ui.set(reference.yaw[2], math.random(-100, -85))
+                end
+            elseif ui.get(anti_aim_settings[state_id].defensive_yaw1) == 'Random' then
+                ui.set(reference.yaw[1], '180')
+
+                ui.set(reference.yaw[2], math.random(-180, 180))
+            end
+        end
+    end
+
+    if ui.get(settings.safe_head_in_air) and (cmd.in_jump == 1 or bit.band(entity.get_prop(self, 'm_fFlags'), 1) == 0) and entity.get_prop(self, 'm_flDuckAmount') > 0.8 and (entity.get_classname(entity.get_player_weapon(self)) == 'CKnife' or entity.get_classname(entity.get_player_weapon(self)) == 'CWeaponTaser') and anti_aim_on_use == false and not (direction == 180 or direction == 90 or direction == -90) then
+        ui.set(reference.pitch[1], 'Down')
+        ui.set(reference.yaw[1], '180')
+        ui.set(reference.yaw[2], 0)
+        ui.set(reference.yaw_jitter[1], 'Off')
+        ui.set(reference.body_yaw[1], 'Off')
+        ui.set(reference.roll, 0)
+    end
+
+    ui.set(reference.edge_yaw, ui.get(settings.edge_yaw) and anti_aim_on_use == false and true or false)
+
+    if ui.get(settings.freestanding) and ((contains(settings.freestanding_conditions, 'Standing') and freestanding_state_id == 1) or (contains(settings.freestanding_conditions, 'Moving') and freestanding_state_id == 2) or (contains(settings.freestanding_conditions, 'Slow motion') and freestanding_state_id == 3) or (contains(settings.freestanding_conditions, 'Crouching') and freestanding_state_id == 4) or (contains(settings.freestanding_conditions, 'In air') and freestanding_state_id == 5)) and anti_aim_on_use == false and not (direction == 180 or direction == 90 or direction == -90) then
+        ui.set(reference.freestanding[1], true)
+        ui.set(reference.freestanding[2], 'Always on')
+
+        if contains(settings.tweaks, 'Off jitter while freestanding') then
+            ui.set(reference.yaw[1], '180')
+            ui.set(reference.yaw[2], 0)
+            ui.set(reference.yaw_jitter[1], 'Off')
+            ui.set(reference.body_yaw[1], 'Opposite')
+            ui.set(reference.body_yaw[2], 0)
+            ui.set(reference.freestanding_body_yaw, true)
+        end
+    else
+        ui.set(reference.freestanding[1], false)
+        ui.set(reference.freestanding[2], 'On hotkey')
+    end
+
+    if ui.get(settings.avoid_backstab) and anti_aim_on_use == false and not (direction == 180 or direction == 90 or direction == -90) then
+        local players = entity.get_players(true)
+
+        if players ~= nil then
+            for i, enemy in pairs(players) do
+                for h = 0, 18 do
+                    local head_x, head_y, head_z = entity.hitbox_position(players[i], h)
+                    local wx, wy = renderer.world_to_screen(head_x, head_y, head_z)
+                    local fractions, entindex_hit = client.trace_line(self, eye_x, eye_y, eye_z, head_x, head_y, head_z)
+
+                    if 250 >= vector(entity.get_prop(enemy, 'm_vecOrigin')):dist(vector(entity.get_prop(self, 'm_vecOrigin'))) and entity.is_alive(enemy) and entity.get_player_weapon(enemy) ~= nil and entity.get_classname(entity.get_player_weapon(enemy)) == 'CKnife' and (entindex_hit == players[i] or fractions == 1) and not entity.is_dormant(players[i]) then
+                        ui.set(reference.yaw[1], '180')
+                        ui.set(reference.yaw[2], -180)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local function on_paint()
+    local me = entity.get_local_player()
+    if me == nil then return end
+    local rr,gg,bb = 87, 235, 61
+    local width, height = client.screen_size()
+    local r2, g2, b2, a2 = 55, 55, 55,255
+    local highlight_fraction =  (globals.realtime() / 2 % 1.2 * 2) - 1.2
+    local output = ""
+    local text_to_draw = "S Y N C T E C H"
+    for idx = 1, #text_to_draw do
+        local character = text_to_draw:sub(idx, idx)
+        local character_fraction = idx / #text_to_draw
+        local r1, g1, b1, a1 = 255, 255, 255, 255
+        local highlight_delta = (character_fraction - highlight_fraction)
+        if highlight_delta >= 0 and highlight_delta <= 1.4 then
+            if highlight_delta > 0.7 then
+            highlight_delta = 1.4 - highlight_delta
+            end
+            local r_fraction, g_fraction, b_fraction, a_fraction = r2 - r1, g2 - g1, b2 - b1
+            r1 = r1 + r_fraction * highlight_delta / 0.8
+            g1 = g1 + g_fraction * highlight_delta / 0.8
+            b1 = b1 + b_fraction * highlight_delta / 0.8
+        end
+        output = output .. ('\a%02x%02x%02x%02x%s'):format(r1, g1, b1, 255, text_to_draw:sub(idx, idx))
+    end
+    output = output
+    
+    local r,g,b,a = 87, 235, 61
+    renderer.text(width - (width-965), height - 15, r, g, b, 255, "cb", 0, output .. ' \afa5757FF[RECODE]')
+end
+client.set_event_callback("paint", on_paint)
+
+client.set_event_callback('paint_ui', function()
+    if entity.get_local_player() == nil then cheked_ticks = 0 end
+
+    if ui.is_menu_open() then
+        ui_set_visible(reference.fake_peek[1], false);
+        ui_set_visible(reference.fake_peek[2], false);
+        ui_set_visible(reference.on_shot_anti_aim[1], false);
+        ui_set_visible(reference.on_shot_anti_aim[2], false);
+
+        ui_set_visible(reference.leg_movement, false);
+        ui_set_visible(reference.slow_motion[1], false);
+        ui_set_visible(reference.slow_motion[2], false);
+        ui_set_visible(reference.fakelag[1], false);
+        ui_set_visible(reference.fakelag[2], false);
+        ui_set_visible(reference.fakelag_amount, false);
+        ui_set_visible(reference.fakelag_variance, false);
+        ui_set_visible(reference.fakelag_limit, false);
+        ui.set_visible(reference.pitch[1], false)
+        ui.set_visible(reference.pitch[2], false)
+        ui.set_visible(reference.yaw_base, false)
+        ui.set_visible(reference.yaw[1], false)
+        ui.set_visible(reference.yaw[2], false)
+        ui.set_visible(reference.yaw_jitter[1], false)
+        ui.set_visible(reference.yaw_jitter[2], false)
+        ui.set_visible(reference.body_yaw[1], false)
+        ui.set_visible(reference.body_yaw[2], false)
+        ui.set_visible(reference.freestanding_body_yaw, false)
+        ui.set_visible(reference.edge_yaw, false)
+        ui.set_visible(reference.freestanding[1], false)
+        ui.set_visible(reference.freestanding[2], false)
+        ui.set_visible(reference.roll, false)
+        ui.set_visible(settings.anti_aim_state, ui.get(current_tab) == 'Anti-Aim')
+        ui.set_visible(settings.avoid_backstab, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.safe_head_in_air, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.manual_forward, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.manual_right, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.manual_left, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.edge_yaw, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.freestanding, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.warmup_disabler, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.freestanding_conditions, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(settings.tweaks, ui.get(current_tab) == 'Keybinds')
+        ui.set_visible(text1, ui.get(current_tab) == 'Home')
+        ui.set_visible(text2, ui.get(current_tab) == 'Home')
+        ui.set_visible(text3, ui.get(current_tab) == 'Home')
+
+        for i = 1, #anti_aim_states do
+            ui.set_visible(anti_aim_settings[i].override_state, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i]); ui.set(anti_aim_settings[1].override_state, true); ui.set_visible(anti_aim_settings[1].override_state, false)
+            ui.set_visible(anti_aim_settings[i].force_defensive, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i]); ui.set_visible(anti_aim_settings[9].force_defensive, false)
+            ui.set_visible(anti_aim_settings[i].pitch1,ui.get(current_tab) == 'Anti-Aim' and  ui.get(settings.anti_aim_state) == anti_aim_states[i])
+            ui.set_visible(anti_aim_settings[i].pitch2, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].pitch1) == 'Custom')
+            ui.set_visible(anti_aim_settings[i].yaw_base, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i])
+            ui.set_visible(anti_aim_settings[i].yaw1, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i])
+            ui.set_visible(anti_aim_settings[i].yaw2_left, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].yaw2_right, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].yaw2_randomize, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].yaw_jitter1, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off')
+            ui.set_visible(anti_aim_settings[i].yaw_jitter2_left, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Off')
+            ui.set_visible(anti_aim_settings[i].yaw_jitter2_right, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Off')
+            ui.set_visible(anti_aim_settings[i].yaw_jitter2_randomize, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Off')
+            ui.set_visible(anti_aim_settings[i].yaw_jitter2_delay, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) == 'Delay')
+            ui.set_visible(anti_aim_settings[i].body_yaw1, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].body_yaw2, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and (ui.get(anti_aim_settings[i].body_yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].body_yaw1) ~= 'Opposite') and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].freestanding_body_yaw, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].body_yaw1) ~= 'Off' and ui.get(anti_aim_settings[i].yaw_jitter1) ~= 'Delay')
+            ui.set_visible(anti_aim_settings[i].roll, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i])
+            ui.set_visible(anti_aim_settings[i].defensive_anti_aimbot, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i]); ui.set_visible(anti_aim_settings[9].defensive_anti_aimbot, false)
+            ui.set_visible(anti_aim_settings[i].defensive_pitch, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot)); ui.set_visible(anti_aim_settings[9].defensive_pitch, false)
+            ui.set_visible(anti_aim_settings[i].defensive_pitch1, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot) and ui.get(anti_aim_settings[i].defensive_pitch)); ui.set_visible(anti_aim_settings[9].defensive_pitch1, false)
+            ui.set_visible(anti_aim_settings[i].defensive_pitch2, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot) and ui.get(anti_aim_settings[i].defensive_pitch) and (ui.get(anti_aim_settings[i].defensive_pitch1) == 'Random' or ui.get(anti_aim_settings[i].defensive_pitch1) == 'Custom')); ui.set_visible(anti_aim_settings[9].defensive_pitch2, false)
+            ui.set_visible(anti_aim_settings[i].defensive_pitch3, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot) and ui.get(anti_aim_settings[i].defensive_pitch) and ui.get(anti_aim_settings[i].defensive_pitch1) == 'Random'); ui.set_visible(anti_aim_settings[9].defensive_pitch3, false)
+            ui.set_visible(anti_aim_settings[i].defensive_yaw, ui.get(current_tab) == 'Anti-Aim' and  ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot)); ui.set_visible(anti_aim_settings[9].defensive_yaw, false)
+            ui.set_visible(anti_aim_settings[i].defensive_yaw1, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot) and ui.get(anti_aim_settings[i].defensive_yaw)); ui.set_visible(anti_aim_settings[9].defensive_yaw1, false)
+            ui.set_visible(anti_aim_settings[i].defensive_yaw2, ui.get(current_tab) == 'Anti-Aim' and ui.get(settings.anti_aim_state) == anti_aim_states[i] and ui.get(anti_aim_settings[i].defensive_anti_aimbot) and ui.get(anti_aim_settings[i].defensive_yaw) and (ui.get(anti_aim_settings[i].defensive_yaw1) == '180' or ui.get(anti_aim_settings[i].defensive_yaw1) == 'Spin' or ui.get(anti_aim_settings[i].defensive_yaw1) == '180 Z')); ui.set_visible(anti_aim_settings[9].defensive_yaw2, false)
+        end
+    end
+end)
+
+import_btn = ui.new_button("AA", "Anti-aimbot angles", "Import settings", function() import(clipboard.get()) end)
+export_btn = ui.new_button("AA", "Anti-aimbot angles", "Export settings", function() 
+    local code = {{}}
+
+    for i, integers in pairs(data.integers) do
+        table.insert(code[1], ui.get(integers))
+    end
+
+    clipboard.set(base64.encode(json.stringify(code)))
+    client.color_log(124, 252, 0, "S Y N C T E C H ~\0")
+	client.color_log(200, 200, 200, " config successfully exported!")
+end)
+default_btn = ui.new_button("AA", "Anti-aimbot angles", "Default Config", function() 
+    import('')
+end)
+
+client.set_event_callback('paint_ui', function()
+    if entity.get_local_player() == nil then cheked_ticks = 0 end
+
+    ui.set_visible(export_btn, ui.get(current_tab) == 'Home')
+    ui.set_visible(import_btn, ui.get(current_tab) == 'Home')
+    ui.set_visible(default_btn, ui.get(current_tab) == 'Home')
+end)
+
+ui.set_callback(console_filter, function()
+    cvar.con_filter_text:set_string("cool text")
+    cvar.con_filter_enable:set_int(1)
+end)
+
+--killsay
+local killsay_pharases = {
+    {"♛ ｇａｍｅｓｅｎｓｅ ♛"},
+    {"1."},
+    {"𝙨𝙡𝙚𝙚𝙥"},
+    {"𝙞𝙦𝙡𝙚𝙨𝙨? 𝙄 𝙪𝙨𝙚 𝙄𝙣𝙫𝙞𝙣𝙨𝙞𝙗𝙡𝙚 𝙡𝙪𝙖"},
+    {"𝘽𝙚𝙨𝙩 𝙧𝙚𝙨𝙤𝙡𝙫𝙚𝙧 𝙗𝙮 𝙞𝙣𝙫𝙞𝙣𝙨𝙞𝙗𝙡𝙚 𝙡𝙪𝙖"},
+    {"「✦𝙄𝙣𝙫𝙞𝙣𝙨𝙞𝙗𝙡𝙚✦」"},
+    {"𝙂𝙚𝙩 𝙜𝙤𝙤𝙙. 𝙂𝙚𝙩 𝙄𝙣𝙫𝙞𝙣𝙨𝙞𝙗𝙡𝙚."},
+}
+    
+local death_say = {
+    {'ну сука', 'не повезло'}
+}
+
+    
+client.set_event_callback('player_death', function(e)
+    delayed_msg = function(delay, msg)
+        return client.delay_call(delay, function() client.exec('say ' .. msg) end)
+    end
+
+    local delay = 2.3
+    local me = entity_get_local_player()
+    local victim = client.userid_to_entindex(e.userid)
+    local attacker = client.userid_to_entindex(e.attacker)
+
+    local killsay_delay = 0
+    local deathsay_delay = 0
+
+    if entity_get_local_player() == nil then return end
+
+    gamerulesproxy = entity.get_all("CCSGameRulesProxy")[1]
+    warmup = entity.get_prop(gamerulesproxy,"m_bWarmupPeriod")
+    if warmup == 1 then return end
+
+    if not ui.get(trashtalk) then return end
+
+    if (victim ~= attacker and attacker == me) then
+        local phase_block = killsay_pharases[math.random(1, #killsay_pharases)]
+
+            for i=1, #phase_block do
+                local phase = phase_block[i]
+                local interphrase_delay = #phase_block[i]/24*delay
+                killsay_delay = killsay_delay + interphrase_delay
+
+                delayed_msg(killsay_delay, phase)
+            end
+        end
+            
+    if (victim == me and attacker ~= me) then
+        local phase_block = death_say[math.random(1, #death_say)]
+
+        for i=1, #phase_block do
+            local phase = phase_block[i]
+            local interphrase_delay = #phase_block[i]/20*delay
+            deathsay_delay = deathsay_delay + interphrase_delay
+
+            delayed_msg(deathsay_delay, phase)
+        end
+    end
+end)
+    
+--
+
+--
+local clantag = {
+    steam = steamworks.ISteamFriends,
+    prev_ct = "",
+    orig_ct = "",
+    enb = false,
+}
+
+local function get_original_clantag()
+    local clan_id = cvar.cl_clanid.get_int()
+    if clan_id == 0 then return "\0" end
+
+    local clan_count = clantag.steam.GetClanCount()
+    for i = 0, clan_count do 
+        local group_id = clantag.steam.GetClanByIndex(i)
+        if group_id == clan_id then
+            return clantag.steam.GetClanTag(group_id)
+        end
+    end
+end
+
+local clantag_anim = function(text, indices)
+
+    time_to_ticks = function(t)
+        return math.floor(0.5 + (t / globals.tickinterval()))
+    end
+
+    local text_anim = "               " .. text ..                       "" 
+    local tickinterval = globals.tickinterval()
+    local tickcount = globals.tickcount() + time_to_ticks(client.latency())
+    local i = tickcount / time_to_ticks(0.3)
+    i = math.floor(i % #indices)
+    i = indices[i+1]+1
+    return string.sub(text_anim, i, i+15)
+end
+
+local function clantag_set()
+    local lua_name = "syntech "
+    if ui.get(clantagchanger) then
+        if ui.get(ui.reference("Misc", "Miscellaneous", "Clan tag spammer")) then ui.set(ui.reference("Misc", "Miscellaneous", "Clan tag spammer"), false) end
+
+		local clan_tag = clantag_anim(lua_name, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 11, 11, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25})
+
+        if entity.get_prop(entity.get_game_rules(), "m_gamePhase") == 5 then
+            clan_tag = clantag_anim('syntech ', {13})
+            client.set_clan_tag(clan_tag)
+        elseif entity.get_prop(entity.get_game_rules(), "m_timeUntilNextPhaseStarts") ~= 0 then
+            clan_tag = clantag_anim('syntech ', {13})
+            client.set_clan_tag(clan_tag)
+        elseif clan_tag ~= clantag.prev_ct  then
+            client.set_clan_tag(clan_tag)
+        end
+
+        clantag.prev_ct = clan_tag
+        clantag.enb = true
+    elseif clantag.enb == true then
+        client.set_clan_tag(get_original_clantag())
+        clantag.enb = false
+    end
+end
+
+clantag.paint = function()
+    if entity.get_local_player() ~= nil then
+        if globals.tickcount() % 2 == 0 then
+            clantag_set()
+        end
+    end
+end
+
+clantag.run_command = function(e)
+    if entity.get_local_player() ~= nil then 
+        if e.chokedcommands == 0 then
+            clantag_set()
+        end
+    end
+end
+
+clantag.player_connect_full = function(e)
+    if client.userid_to_entindex(e.userid) == entity.get_local_player() then 
+        clantag.orig_ct = get_original_clantag()
+    end
+end
+
+clantag.shutdown = function()
+    client.set_clan_tag(get_original_clantag())
+end
+
+client.set_event_callback("paint", clantag.paint)
+client.set_event_callback("run_command", clantag.run_command)
+client.set_event_callback("player_connect_full", clantag.player_connect_full)
+client.set_event_callback("shutdown", clantag.shutdown)
+--
+
+client.set_event_callback('net_update_end', function()
+    if entity.get_local_player() ~= nil then
+        is_defensive_active = is_defensive(entity.get_local_player())
+    end
+end)
+
+--fastladder
+client.set_event_callback('setup_command', function(cmd)
+    if ui.get(fastladder) then
+        local pitch, yaw = client.camera_angles()
+        if entity.get_prop(entity.get_local_player(), "m_MoveType") == 9 then
+            cmd.yaw = math.floor(cmd.yaw+0.5)
+            cmd.roll = 0
+            
+            if cmd.forwardmove > 0 then
+                if pitch < 45 then
+
+                    cmd.pitch = 89
+                    cmd.in_moveright = 1
+                    cmd.in_moveleft = 0
+                    cmd.in_forward = 0
+                    cmd.in_back = 1
+
+                    if cmd.sidemove == 0 then
+                        cmd.yaw = cmd.yaw + 90
+                    end
+
+                    if cmd.sidemove < 0 then
+                        cmd.yaw = cmd.yaw + 150
+                    end
+
+                    if cmd.sidemove > 0 then
+                        cmd.yaw = cmd.yaw + 30
+                    end
+                end 
+            end
+
+            if cmd.forwardmove < 0 then
+                cmd.pitch = 89
+                cmd.in_moveleft = 1
+                cmd.in_moveright = 0
+                cmd.in_forward = 1
+                cmd.in_back = 0
+                if cmd.sidemove == 0 then
+                    cmd.yaw = cmd.yaw + 90
+                end
+                if cmd.sidemove > 0 then
+                    cmd.yaw = cmd.yaw + 150
+                end
+                if cmd.sidemove < 0 then
+                    cmd.yaw = cmd.yaw + 30
+                end
+            end
+
+        end
+    end
+end)
+
+--legbreaker
+local ref = {
+    leg_movement = ui.reference('AA', 'Other', 'Leg movement')
+}
+
+local ab = {}
+
+ab.pre_render = function()
+    if ui.get(anim_breakerx) then
+        local local_player = entity.get_local_player()
+        if not entity.is_alive(local_player) then return end
+
+        entity.set_prop(local_player, "m_flPoseParameter", client.random_float(0.8/10, 1), 0)
+        ui.set(ref.leg_movement, client.random_int(1, 2) == 1 and "Off" or "Always slide")
+    end
+end
+
+ab.setup_command = function(e)
+    if not ui.get(anim_breakerx) then return end
+
+    local local_player = entity.get_local_player()
+    if not entity.is_alive(local_player) then return end
+
+    ui.set(ref.leg_movement, 'Always slide')
+end
+
+local ui_callback = function(c)
+    local enabled, addr = ui.get(c), ''
+
+    if not enabled then
+        addr = 'un'
+    end
+    
+    local _func = client[addr .. 'set_event_callback']
+
+    _func('pre_render', ab.pre_render)
+    _func('setup_command', ab.setup_command)
+end
+
+ui.set_callback(master_switch, ui_callback)
+ui_callback(master_switch)
+
+local is_on_ground = false
+
+--- @region: process main work
+--
+client.set_event_callback("setup_command", function()
+    if entity.get_local_player() == nil then return end
+
+    gamerulesproxy = entity.get_all("CCSGameRulesProxy")[1]
+    warmup = entity.get_prop(gamerulesproxy,"m_bWarmupPeriod")
+    --print(warmup)
+  
+    if ui.get(settings.warmup_disabler) and warmup == 1 then
+        ui.set(reference.body_yaw[1], 'Off')
+        ui.set(reference.yaw[2], math.random(-180, 180))
+        ui.set(reference.yaw_jitter[1], 'Random')
+        ui.set(reference.pitch[1], 'Off')
+    end
+end)
+--
+
+client.set_event_callback("setup_command", function(cmd)
+    is_on_ground = cmd.in_jump == 0
+
+    if ui.get(anim_breakerx) then
+        ui.set(ref.leg_movement, cmd.command_number % 3 == 0 and "Off" or "Always slide")
+    end
+end)
+
+client.set_event_callback("pre_render", function()
+    local self = entity.get_local_player()
+    if not self or not entity.is_alive(self) then
+        return
+    end
+
+    local self_index = c_entity.new(self)
+    local self_anim_state = self_index:get_anim_state()
+
+    if not self_anim_state then
+        return
+    end
+
+    if ui.get(anim_breakerx) then
+        entity.set_prop(self, "m_flPoseParameter", E_POSE_PARAMETERS.STAND, globals.tickcount() % 4 > 1 and 5 / 10 or 1)
+    
+        local self_anim_overlay = self_index:get_anim_overlay(12)
+        if not self_anim_overlay then
+            return
+        end
+
+        local x_velocity = entity.get_prop(self, "m_vecVelocity[0]")
+        if math.abs(x_velocity) >= 3 then
+            self_anim_overlay.weight = 100 / 100
+        end
+    end
+end)
+--- @endregion
+
+--scope
+local second_zoom do
+    second_zoom = { }
+
+    local old_value
+
+    local function callback(item)
+        local fn = client_set_event_callback
+        local value = ui_get(item)
+
+        if not value then
+            second_zoom.shutdown()
+            fn = client_unset_event_callback
+        end
+
+        ui_set_visible(scope_fov, value)
+
+        fn("shutdown", second_zoom.shutdown)
+        fn("pre_render", second_zoom.pre_render)
+    end
+
+    local function reset()
+        if old_value == nil then
+            return
+        end
+
+        ui_set(override_zoom_fov, old_value)
+        old_value = nil
+    end
+
+    local function update()
+        if old_value == nil then
+            old_value = ui_get(override_zoom_fov)
+        end
+
+        ui_set(override_zoom_fov, ui_get(scope_fov))
+    end
+
+    
+    client.set_event_callback('paint', function()
+
+    if ui.get(scope_fov) == 0 then
+        return
+    end
+
+    if ui.get(scope_fov) > 0 then
+            local me = entity_get_local_player()
+
+            if me == nil then
+                return
+            end
+
+            local wpn = entity_get_player_weapon(me)
+
+            if wpn == nil then
+                return
+            end
+
+            local zoom_level = entity_get_prop(wpn, "m_zoomLevel")
+
+            if zoom_level ~= 2 then
+                reset()
+                return
+            end
+
+            update()
+        end
+    end)
+end
+--
+
+client.set_event_callback('paint', function()
+    cvar.r_aspectratio:set_float(ui.get(aspectratio)/100)
+end)
+--
+
+local queue = {}
+
+local function aim_firec(c)
+	queue[globals.tickcount()] = {c.x, c.y, c.z, globals.curtime() + 2}
+end
+
+local function paintc(c)
+	if ui.get(hitmarker) then
+        for tick, data in pairs(queue) do
+            if globals.curtime() <= data[4] then
+                local x1, y1 = renderer.world_to_screen(data[1], data[2], data[3])
+                if x1 ~= nil and y1 ~= nil then
+                    renderer.line(x1 - 6, y1, x1 + 6, y1, 34, 214, 132, 255)
+                    renderer.line(x1, y1 - 6, x1, y1 + 6, 108, 182, 203, 255)
+                end
+            end
+        end
+    end
+end
+
+client.set_event_callback("aim_fire", aim_firec)
+client.set_event_callback("paint", paintc)
+client.set_event_callback("round_prestart", function() queue = {} end)
+--
+
+local hitgroup_names = {"generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", "neck", "?", "gear"}
+local weapon_to_verb = { knife = 'Knifed', hegrenade = 'Naded', inferno = 'Burned' }
+
+client.set_event_callback('aim_hit', function(e)
+	if not ui.get(master_switch) or e.id == nil then
+		return
+	end
+
+	local group = hitgroup_names[e.hitgroup + 1] or "?"
+
+	client.color_log(124, 252, 0, "[syntech]\0")
+	client.color_log(200, 200, 200, " Hit\0")
+	client.color_log(124, 252, 0, string.format(" %s\0", entity.get_player_name(e.target)))
+	client.color_log(200, 200, 200, " in the\0")
+	client.color_log(124, 252, 0, string.format(" %s\0", group))
+	client.color_log(200, 200, 200, " for\0")
+	client.color_log(124, 252, 0, string.format(" %s\0", e.damage))
+	client.color_log(200, 200, 200, " damage\0")
+	client.color_log(200, 200, 200, " (\0")
+	client.color_log(124, 252, 0, string.format("%s\0", entity.get_prop(e.target, "m_iHealth")))
+	client.color_log(200, 200, 200, " health remaining)")
+end)
+
+client.set_event_callback("aim_miss", function(e)
+	if not ui.get(master_switch) then
+		return
+	end
+
+	local group = hitgroup_names[e.hitgroup + 1] or "?"
+
+	client.color_log(255, 0, 0, "[syntech]\0")
+	client.color_log(200, 200, 200, " Missed shot in\0")
+	client.color_log(255, 0, 0, string.format(" %s\'s\0", entity.get_player_name(e.target)))
+	client.color_log(255, 0, 0, string.format(" %s\0", group))
+	client.color_log(200, 200, 200, " due to\0")
+	client.color_log(255, 0, 0, string.format(" %s", e.reason))
+end)
+
+client.set_event_callback('player_hurt', function(e)
+	if not ui.get(master_switch) then
+		return
+	end
+	
+	local attacker_id = client.userid_to_entindex(e.attacker)
+
+	if attacker_id == nil or attacker_id ~= entity.get_local_player() then
+        return
+    end
+
+	if weapon_to_verb[e.weapon] ~= nil then
+        local target_id = client.userid_to_entindex(e.userid)
+		local target_name = entity.get_player_name(target_id)
+
+		--print(string.format("%s %s for %i damage (%i remaining)", weapon_to_verb[e.weapon], string.lower(target_name), e.dmg_health, e.health))
+		client.color_log(124, 252, 0, "[syntech]\0")
+		client.color_log(200, 200, 200, string.format(" %s\0", weapon_to_verb[e.weapon]))
+		client.color_log(124, 252, 0, string.format(" %s\0", target_name))
+		client.color_log(200, 200, 200, " for\0")
+		client.color_log(124, 252, 0, string.format(" %s\0", e.dmg_health))
+		client.color_log(200, 200, 200, " damage\0")
+		client.color_log(200, 200, 200, " (\0")
+		client.color_log(124, 252, 0, string.format("%s\0", e.health))
+		client.color_log(200, 200, 200, " health remaining)")
+	end
+end)
+
+client.set_event_callback('shutdown', function()
+    ui.set_visible(reference.pitch[1], true)
+    ui.set_visible(reference.yaw_base, true)
+    ui.set_visible(reference.yaw[1], true)
+    ui.set_visible(reference.body_yaw[1], true)
+    ui.set_visible(reference.edge_yaw, true)
+    ui.set_visible(reference.freestanding[1], true)
+    ui.set_visible(reference.freestanding[2], true)
+    ui.set_visible(reference.roll, true)
+
+    cvar.r_aspectratio:set_float(0)
+
+    ui.set(override_zoom_fov, 0)
+    ui.set(reference.pitch[1], 'Off')
+    ui.set(reference.pitch[2], 0)
+    ui.set(reference.yaw_base, 'Local view')
+    ui.set(reference.yaw[1], 'Off')
+    ui.set(reference.yaw[2], 0)
+    ui.set(reference.yaw_jitter[1], 'Off')
+    ui.set(reference.yaw_jitter[2], 0)
+    ui.set(reference.body_yaw[1], 'Off')
+    ui.set(reference.body_yaw[2], 0)
+    ui.set(reference.freestanding_body_yaw, false)
+    ui.set(reference.edge_yaw, false)
+    ui.set(reference.freestanding[1], false)
+    ui.set(reference.freestanding[2], 'On hotkey')
+    ui.set(reference.roll, 0)
+end)
+
+local IsNewClientAvailable = panorama.loadstring([[
+	var oldClientStatus = NewsAPI.IsNewClientAvailable;
+
+	return {
+		disable: function(){
+			NewsAPI.IsNewClientAvailable = function(){ return false };
+		},
+		restore: function(){
+            NewsAPI.IsNewClientAvailable = oldClientStatus;
+		}
+	}
+]])()
+
+IsNewClientAvailable.disable()
+
+client.set_event_callback("shutdown", function()
+	IsNewClientAvailable.restore()
+end)
+
+--- @region: prepare helpers
+table.contains = function(source, target)
+    local source_element = ui.get(source)
+    for id, name in pairs(source_element) do
+        if name == target then
             return true
         end
     end
@@ -179,2020 +1227,189 @@ local function includes( table, key )
     return false
 end
 
-local function time_to_ticks( t )
-    return math.floor( 0.5 + ( t / globals.tickinterval( ) ) )
-end
-
-local function ticks_to_time( t )
-    return globals.tickinterval( ) * t
-end
-
-local function rgb_to_hex( r, g, b, a )
-    return string.format( "%02x%02x%02x%02x", r or 255, g or 255, b or 255, a or 255 )
-end
-
-local function length( position )
-    return math.abs( position[ 1 ] ) + math.abs( position[ 2 ] ) + math.abs( position[ 3 ] )
-end
-
-local function length_sqr( position )
-    return math.abs( ( position[ 1 ] * position[ 1 ] ) + ( position[ 2 ] * position[ 2 ] ) + ( position[ 3 ] * position[ 3 ] ) )
-end
-
-local function vector_diff( vector_1, vector_2 )
-    local new_vector = { }
-    for i=1, #vector_1 do
-        new_vector[ i ] = vector_1[ i ] - vector_2[ i ]
-    end
-    return new_vector
-end
-
-local function map(n, start, stop, new_start, new_stop)
-    local value = (n - start) / (stop - start) * (new_stop - new_start) + new_start
-    return new_start < new_stop and math.max(math.min(value, new_stop), new_start) or math.max(math.min(value, new_start), new_stop)
-end
-
-local function KaysFunction(A,B,C)
-    local d = (A-B) / A:dist(B)
-    local v = C - B
-    local t = v:dot(d)
-    local P = B + d:scaled(t)
-
-    return P:dist(C)
-end
-
-local function GetClosestPoint(A, B, P)
-    local a_to_p = { P[1] - A[1], P[2] - A[2] }
-    local a_to_b = { B[1] - A[1], B[2] - A[2] }
-
-    local atb2 = a_to_b[1]^2 + a_to_b[2]^2
-
-    local atp_dot_atb = a_to_p[1]*a_to_b[1] + a_to_p[2]*a_to_b[2]
-    local t = atp_dot_atb / atb2
-
-    return { A[1] + a_to_b[1]*t, A[2] + a_to_b[2]*t }
-end
-
-local references = {
-    min_damage = ui.reference( "RAGE", "Aimbot", "Minimum damage" ),
-    min_damage_override = { ui.reference( "RAGE", "Aimbot", "Minimum damage override" ) },
-    double_tap = { ui.reference( "RAGE", "Aimbot", "Double tap" ) },
-    quick_peek = { ui.reference( "RAGE", "Other", "Quick peek assist" ) },
-    fake_duck = ui.reference( "RAGE", "Other", "Duck peek assist" ),
-    anti_aim = ui.reference( "AA", "Anti-aimbot angles", "Enabled" ),
-    pitch = { ui.reference( "AA", "Anti-aimbot angles", "Pitch" ) },
-    yaw_base = ui.reference( "AA", "Anti-aimbot angles", "Yaw base" ),
-    yaw = { ui.reference( "AA", "Anti-aimbot angles", "Yaw" ) },
-    yaw_jitter = { ui.reference( "AA", "Anti-aimbot angles", "Yaw jitter" ) },
-    body_yaw = { ui.reference( "AA", "Anti-aimbot angles", "Body yaw" ) },
-    freestanding_body_yaw = ui.reference( "AA", "Anti-aimbot angles", "Freestanding body yaw" ),
-    edge_yaw = ui.reference( "AA", "Anti-aimbot angles", "Edge yaw" ),
-    freestanding = { ui.reference( "AA", "Anti-aimbot angles", "Freestanding" ) },
-    roll = ui.reference( "AA", "Anti-aimbot angles", "Roll" ),
-    fake_lag = { ui.reference( "AA", "Fake lag", "Enabled" ) },
-    fake_lag_amount = ui.reference( "AA", "Fake lag", "Amount" ),
-    fake_lag_variance = ui.reference( "AA", "Fake lag", "Variance" ),
-    fake_lag_limit = ui.reference( "AA", "Fake lag", "Limit" ),
-    leg_movement = ui.reference( "AA", "Other", "Leg movement" ),
-    slow_motion = { ui.reference( "AA", "Other", "Slow motion" ) },
-    on_shot = { ui.reference( "AA", "Other", "On shot anti-aim" ) },
-    player_list = ui.reference( "PLAYERS", "Players", "Player list" ),
-    sv_maxusrcmdprocessticks = ui.reference("misc", "settings", "sv_maxusrcmdprocessticks2"),
-    force_baim = ui.reference( "RAGE", "Aimbot", "Force body aim" ),
-    force_safepoint = ui.reference( "RAGE", "Aimbot", "Force safe point" )
+local c_entity = require("gamesense/entity")
+local E_POSE_PARAMETERS = {
+    STRAFE_YAW = 0,
+    STAND = 1,
+    LEAN_YAW = 2,
+    SPEED = 3,
+    LADDER_YAW = 4,
+    LADDER_SPEED = 5,
+    JUMP_FALL = 6,
+    MOVE_YAW = 7,
+    MOVE_BLEND_CROUCH = 8,
+    MOVE_BLEND_WALK = 9,
+    MOVE_BLEND_RUN = 10,
+    BODY_YAW = 11,
+    BODY_PITCH = 12,
+    AIM_BLEND_STAND_IDLE = 13,
+    AIM_BLEND_STAND_WALK = 14,
+    AIM_BLEND_STAND_RUN = 14,
+    AIM_BLEND_CROUCH_IDLE = 16,
+    AIM_BLEND_CROUCH_WALK = 17,
+    DEATH_YAW = 18
 }
 
-local anti_aim = {
-    states = { "Default", "Safe", "Standing", "Running", "Full-speed", "Ducking", "In air", "Air duck", "High ground", "Low ground", "Slow motion" },
-    state = 1,
-    current_state = "Default",
-    stage = "Regular",
-    backstab = false,
-    ping_threshold = 0,
-    max_ping_threshold = 25,
-    force_freestanding = false,
-    force_edge_yaw = false,
-    old_simtime = 0,
-    latency_list = { },
-    in_defensive = false,
-    defensive_duration = 0,
-    attempting_choke = false,
-    last_force_defensive = 0,
-    force_immunity = false,
-    choke_limit = 1,
-    origin_list = { },
-    safe = { },
-    last_in_air = 0,
-    delay = 0,
-    miss_counter_round = 0,
-    miss_counter_game = 0,
-    local_damaged = false,
-    head_hitbox = {0, 0, 0},
-    flutter_amount = 0,
-    contortion_amount = 0,
-    jitter_value = 0,
-    body_yaw = "d",
+local is_on_ground = false
+--- @endregion
+
+--- @region: prepare menu elements
+
+--- @endregion
+
+--- @region: process main work
+client.set_event_callback("setup_command", function(cmd)
+    is_on_ground = cmd.in_jump == 0
+end)
+
+function jitterValue()
+    local currentTime = globals.tickcount() / 10
+    local jitterFrequency = 7  
+
+    local jitterFactor = 0.5 + 0.5 * math.sin(currentTime * jitterFrequency)
+
+    return jitterFactor * 100
+end
+
+-- Example usage
+client.set_event_callback("pre_render", function()
+    local self = entity.get_local_player()
+    if not self or not entity.is_alive(self) then
+        return
+    end
+
+    local self_index = c_entity.new(self)
+    local self_anim_state = self_index:get_anim_state()
+
+    if not self_anim_state then
+        return
+    end
+
+    if table.contains(m_elements, "kangaroo") then
+        entity.set_prop(entity.get_local_player(), "m_flPoseParameter", math.random(0, 10)/10, 3)
+        entity.set_prop(entity.get_local_player(), "m_flPoseParameter", math.random(0, 10)/10, 7)
+        entity.set_prop(entity.get_local_player(), "m_flPoseParameter", math.random(0, 10)/10, 6)
+    end
+
+    if table.contains(m_elements, "airbreak") then
+        entity.set_prop(self, "m_flPoseParameter", globals.tickcount() % 4 > 1 and math.random(0, 10) / 10, E_POSE_PARAMETERS.JUMP_FALL)
+    end
+    
+    if table.contains(m_elements, "earthquake") then
+        local self_anim_overlay = self_index:get_anim_overlay(12)
+        if not self_anim_overlay then
+            return
+        end
+
+        if globals.tickcount() % 10 > 1 then
+            self_anim_overlay.weight = jitterValue() / 100
+        end
+    end
+end)
+--- @endregion
+
+function lerp(a, b, t)
+    if not b or not a or not t then return end
+    return a + (b - a) * t
+end
+function ui.multiReference(tab, groupbox, name)
+    local ref1, ref2, ref3 = ui.reference(tab, groupbox, name)
+    return { ref1, ref2, ref3 }
+end
+rgba_to_hex = function(r, g, b, a)
+    return bit.tohex((math.floor(r + 0.5) * 16777216) + (math.floor(g + 0.5) * 65536) + (math.floor(b + 0.5) * 256) + (math.floor(a + 0.5)))
+end
+func = {
+    table_contains = function(tbl, value)
+        for i = 1, #tbl do
+            if tbl[i] == value then
+                return true
+            end
+        end
+        return false
+    end,
+    includes = function(tbl, value)
+        for i = 1, #tbl do
+            if tbl[i] == value then
+                return true
+            end
+        end
+        return false
+    end,
 }
+animate_text = function(time, string, r, g, b, a, r2, g2, b2, a2)
+    local m, n, o, p = r2, g2, b2, a2
+    local t_out = {}
+    local l = string:len() - 1
+    local r_add = (m - r)
+    local g_add = (n - g)
+    local b_add = (o - b)
+    local a_add = (p - a)
 
+    for i = 1, #string do
+        local iter = (i - 1) / (#string - 1) + time
+        t_out[#t_out + 1] = "\a" .. rgba_to_hex(r + r_add * math.abs(math.cos(iter)), g + g_add * math.abs(math.cos(iter)), b + b_add * math.abs(math.cos(iter)), a + a_add * math.abs(math.cos(iter)))
+        t_out[#t_out + 1] = string:sub(i, i)
+    end
 
-
-local items = { }
-
-items.master_switch = syntech.new_menu_item( ui.new_checkbox, "\n" )
-items.master_switch_label = syntech.new_menu_item( ui.new_label, "syntech" )
-
-
-items.tab = syntech.new_menu_item(ui.new_combobox, "Tab", "Fake lag", {{items.master_switch, true}}, "rage", "anti-aim", "visuals", "misc")
-
-items.debug_panel = syntech.new_menu_item( ui.new_checkbox, "Debug panel", nil, {{items.tab, "misc"}})
-items.debug_logs = syntech.new_menu_item( ui.new_checkbox, "Debug logs", nil, {{items.tab, "misc"}} )
-items.clan_tag = syntech.new_menu_item( ui.new_checkbox, "Clan tag", nil, {{items.tab, "misc"}} )
-items.safe_knife = syntech.new_menu_item(ui.new_checkbox, "Safe knife", nil, { {items.tab, "misc"}})
-items.safe_knife_options = syntech.new_menu_item(ui.new_combobox, "Safe knife options", nil, {{items.safe_knife, true}, {items.tab, "misc"}}, "Visible", "Always")
-
-items.anti_aim = syntech.new_menu_item( ui.new_checkbox, "Anti-aim", nil, {{items.tab, "anti-aim"}} )
-items.anti_aim_options = syntech.new_menu_item( ui.new_multiselect, "Anti-aim options", nil, { { items.anti_aim, true }, { items.tab, "anti-aim" } }, "Optimize leg movement","Break leg movement",  "Anti-backstab", "Desync on use", "Prevent harmful fakelag", "Immunity flick", "Edge yaw" )
-items.twist_in_air = syntech.new_menu_item( ui.new_checkbox, "Twist in air", nil, { { items.anti_aim, true }, { items.tab, "anti-aim" }} )
-items.twist_in_air_type = syntech.new_menu_item( ui.new_combobox, "Twist mode", nil, { { items.anti_aim, true }, { items.twist_in_air, true }, { items.tab, "anti-aim" } }, "Spin", "Avoidance" )
-items.freestanding = syntech.new_menu_item( ui.new_checkbox, "Freestanding", nil, { { items.anti_aim, true }, { items.tab, "anti-aim" } } )
-items.freestand_key = syntech.new_menu_item( ui.new_hotkey, "Freestanding key", nil, { { items.anti_aim, true }, { items.tab, "anti-aim" } }, true )
-items.freestanding_options = syntech.new_menu_item(ui.new_combobox, "Freestanding options", nil, { { items.anti_aim, true }, { items.freestanding, true }, { items.tab, "anti-aim" } }, "Default", "Jitter", "Static")
---items.anti_aim_state_label = syntech.new_menu_item( ui.new_label, "
-items.anti_aim_state = syntech.new_menu_item( ui.new_combobox, "Custom state", nil, { { items.anti_aim, true, }, { items.tab, "anti-aim" } }, table.unpack( anti_aim.states ) )
-
-items.visuals_label = syntech.new_menu_item( ui.new_label, "Visuals", nil, { { items.tab, "visuals" } } )
-items.animations = syntech.new_menu_item(ui.new_combobox, "Animations", nil, { { items.tab, "visuals" } }, "Off", "Skydive mode", "Funny legs", "Funny legs always")
-items.indicator_enable = syntech.new_menu_item( ui.new_combobox, "Display crosshair indicators", nil, { { items.tab, "visuals" } }, "None", "Default", "Modern" )
-items.main_color_label = syntech.new_menu_item( ui.new_label, "Main color", nil, { { items.tab, "visuals" }, {items.indicator_enable, "Modern" } } )
-items.main_color = syntech.new_menu_item( ui.new_color_picker, "Main color", nil, { { items.tab, "visuals" }, {items.indicator_enable, "Modern" } }, 255, 255, 255, 255 )
-items.second_color_label = syntech.new_menu_item( ui.new_label, "Second color", nil, { { items.tab, "visuals" }, {items.indicator_enable, "Modern" } } )
-items.second_color = syntech.new_menu_item( ui.new_color_picker, "Second color", nil, { { items.tab, "visuals" }, {items.indicator_enable, "Modern" } }, 255, 255, 255, 255 )
-items.default_colors = syntech.new_menu_item( ui.new_color_picker, "Default color", nil, { { items.tab, "visuals" }, {items.indicator_enable, "Modern" } }, 255, 255, 255, 255 )
-
-
-items.safety_flag = syntech.new_menu_item( ui.new_checkbox, "Display safety flag", nil, { { items.tab, "visuals" } } )
-
-items.fake_lag_label = syntech.new_menu_item( ui.new_label, "Fake lag info", "Fake lag", { { items.anti_aim, true } } )
-items.fake_lag_label_info = syntech.new_menu_item( ui.new_label, "choke: 0 | force: 0", "Fake lag", { { items.anti_aim, true } } )
-
-items.ideal_tick = syntech.new_menu_item( ui.new_checkbox, "Ideal tick", nil, {{items.tab, "rage"}} )
-items.ideal_tick_key = syntech.new_menu_item( ui.new_hotkey, "Ideal tick key", nil, {{items.tab, "rage"}}, true )
-items.ideal_tick_options = syntech.new_menu_item( ui.new_multiselect, "Ideal tick options", nil, { { items.tab, "rage" }, { items.ideal_tick, true } }, "Freestanding", "Immunity" )
-items.double_tap_restore = syntech.new_menu_item( ui.new_combobox, "Double tap restore", nil, { {items.tab, "rage"}, { items.ideal_tick, true } }, "Always on", "On hotkey", "Toggle", "Off hotkey" )
-items.quick_peek_restore = syntech.new_menu_item( ui.new_combobox, "Quick peek restore", nil, { { items.tab, "rage" }, { items.ideal_tick, true } }, "Always on", "On hotkey", "Toggle", "Off hotkey" )
-
-items.state_enabled = { }
-items.anti_aim_type = { }
-items.yaw_offset = { }
-items.force_immunity = { }
-items.safety_triggers = { }
-items.danger_threshold = { }
-
-items.contortion_modifers_label = {  }
-items.contortion_modifers_breaker = {  }
-items.jitter_type = { }
-items.jitter_body_yaw = {}
-items.jitter_strength = { }
-items.prevent_logging = { }
-items.contortion_strength = { }
-items.flutter = { }
-items.flutter_strength = { }
-items.contortion_body_yaw = { }
-
-items.prevent_prediction = { }
-items.randomize_contortion = { }
-items.jitter_contort = {  }
-items.jitter_contort_strength = { }
-items.jitter_contort_bodyyaw = { }
-items.jitter_contort_type = { }
-
-items.delay_swap = { }
-items.l_yaw_offset = { }
-items.r_yaw_offset = { }
-for i=1, #anti_aim.states do
-    items.state_enabled[ i ] = syntech.new_menu_item( ui.new_checkbox, string.format( "[ %s ] Enabled", anti_aim.states[ i ] ), nil, { { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.tab, "anti-aim" } } )
-
-    local generic_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.tab, "anti-aim" } }
-
-    items.anti_aim_type[ i ] = syntech.new_menu_item( ui.new_combobox, "Type", nil, generic_conditions, "Jitter", "Contortion" )
-    items.safety_triggers[ i ] = syntech.new_menu_item( ui.new_multiselect, "Safety triggers", nil, generic_conditions, "Dangerous enemy", "Unviable anti-aim" )
-    items.danger_threshold[ i ] = syntech.new_menu_item( ui.new_slider, "Danger threshold", nil, generic_conditions, 1, 100, 100, true, "%" )
-
-    local jitter_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.anti_aim_type[ i ], "Jitter" }, { items.tab, "anti-aim" } }
-    items.jitter_type[ i ] = syntech.new_menu_item( ui.new_combobox, "Jitter type", nil, jitter_conditions, "Default", "Slow" )
-
-    local jitter_strength_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.tab, "anti-aim" }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.anti_aim_type[ i ], "Jitter" }, { items.jitter_type[ i ], "Default" } }
-    local jitter_body_yaw_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.anti_aim_type[ i ], "Jitter" }, { items.jitter_type[ i ], "Slow" }, { items.tab, "anti-aim" } }
-    items.jitter_body_yaw [i] = syntech.new_menu_item( ui.new_combobox, "Jitter body yaw", nil, jitter_body_yaw_conditions, "Static","Jitter" ,"No Desync" )
-    items.jitter_strength[ i ] = syntech.new_menu_item( ui.new_slider, "Jitter strength", nil, jitter_strength_conditions, 1, 100, 50, true, "%" )
-    items.prevent_logging[ i ] = syntech.new_menu_item( ui.new_checkbox, "Prevent angle logging", nil, jitter_conditions )
-    local jitter_not_default_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.anti_aim_type[ i ], "Jitter" }, { items.jitter_type[ i ], "Slow" }, { items.tab, "anti-aim" } }
-    items.l_yaw_offset[ i ] = syntech.new_menu_item( ui.new_slider, anti_aim.states[i] .. ' left offset', nil, jitter_not_default_conditions, -180, 180, 0, true, '°' )
-    items.r_yaw_offset[ i ] = syntech.new_menu_item( ui.new_slider, anti_aim.states[i] .. ' right offset', nil, jitter_not_default_conditions, -180, 180, 0, true, '°' )
-    items.delay_swap[ i ] = syntech.new_menu_item(ui.new_slider, "Delay swap", nil, jitter_not_default_conditions, 2, 10, 2, true, "t", 1)
-
-    local contortion_conditions = { { items.state_enabled[ i ], true }, { items.anti_aim, true }, { items.anti_aim_state, anti_aim.states[ i ] }, { items.anti_aim_type[ i ], "Contortion" }, { items.tab, "anti-aim" } }
-
-    items.contortion_strength[ i ] = syntech.new_menu_item( ui.new_slider, "Contortion strength", nil, contortion_conditions, 1, 100, 50, true, "%" )
-    items.contortion_body_yaw[ i ] = syntech.new_menu_item( ui.new_combobox, "Body Yaw", nil, contortion_conditions, "Jitter", "Opposite" )
-
-    --items.contortion_modifers_breaker [ i] = syntech.new_menu_item(ui.new_label, "
-    items.contortion_modifers_label [ i] = syntech.new_menu_item(ui.new_label, "Contortion Modifiers", nil, contortion_conditions)
-    items.flutter[ i ] = syntech.new_menu_item( ui.new_checkbox, "Flutter", nil, contortion_conditions )
-    items.flutter_strength[i] = syntech.new_menu_item(ui.new_combobox, "Flutter Strength", nil, { { items.state_enabled[i], true }, { items.anti_aim, true }, { items.tab, "anti-aim" }, { items.anti_aim_state, anti_aim.states[i] }, { items.anti_aim_type[i], "Contortion" }, { items.flutter[i], true } }, "Low", "Medium", "High")
-    items.prevent_prediction[ i ] = syntech.new_menu_item( ui.new_checkbox, "Prevent contortion prediction", nil, contortion_conditions )
-    items.randomize_contortion[ i ] = syntech.new_menu_item( ui.new_checkbox, "Randomize", nil, contortion_conditions )
-
-    items.jitter_contort[ i ] = syntech.new_menu_item( ui.new_checkbox, "Jitter Contortion", nil, contortion_conditions )
-    items.jitter_contort_bodyyaw[ i ] = syntech.new_menu_item( ui.new_combobox, "Jitter Body Yaw", nil, { { items.state_enabled[i], true }, { items.anti_aim, true }, { items.tab, "anti-aim" }, { items.anti_aim_state, anti_aim.states[i] }, { items.anti_aim_type[i], "Contortion" }, { items.jitter_contort[i], true } }, "Flip Static", "Jitter", "Off" )
-    items.jitter_contort_type[ i ] = syntech.new_menu_item( ui.new_combobox, "Jitter Type", nil, { { items.state_enabled[i], true }, { items.anti_aim, true }, { items.tab, "anti-aim" }, { items.anti_aim_state, anti_aim.states[i] }, { items.anti_aim_type[i], "Contortion" }, { items.jitter_contort[i], true } }, "Center", "Offset" )
-
-    items.jitter_contort_strength[ i ] = syntech.new_menu_item( ui.new_slider, "Jitter strength", nil, { { items.state_enabled[i], true }, { items.anti_aim, true }, { items.tab, "anti-aim" }, { items.anti_aim_state, anti_aim.states[i] }, { items.anti_aim_type[i], "Contortion" }, { items.jitter_contort[i], true } }, 1, 100, 50, true, "%" )
-
-
-
-    items.force_immunity[ i ] = syntech.new_menu_item( ui.new_checkbox, string.format( "Force immunity on %s", anti_aim.states[ i ]:lower( ) ), nil, generic_conditions )
+    return table.concat(t_out)
 end
 
-local ideal_tick = {
-    previous_weapon = nil,
-    active = false,
-    should_reset = false,
-    last_restore_type = { "", "" }
-}
-
-function ideal_tick.run( cmd )
-    ideal_tick.active = false
-
-    if not ui.get( items.anti_aim ) then
-        return
+function animate_color(time, r, g, b, a, r2, g2, b2, a2)
+    local finished = false
+    local newR, newG, newB, newA = r, g, b, a
+    if newR == r2 and newG == g2 and newB == b2 and newA == a2 then
+        newR = lerp(r, r2, time)
+        newG = lerp(g, g2, time)
+        newB = lerp(b, b2, time)
+        newA = lerp(a, a2, time)
+    else
+        newR = lerp(r2, r, time)
+        newG = lerp(g2, g, time)
+        newB = lerp(b2, b, time)
+        newA = lerp(a2, a, time)
     end
-
-    local quick_peek_restore = ui.get( items.quick_peek_restore )
-    local double_tap_restore = ui.get( items.double_tap_restore )
-
-    if not ui.get( items.ideal_tick ) or not ui.get( items.ideal_tick_key ) then
-        if ui.get( items.ideal_tick ) then
-            if ideal_tick.last_restore_type[ 1 ] ~= quick_peek_restore or ideal_tick.last_restore_type[ 2 ] ~= double_tap_restore then
-                ui.set( references.quick_peek[ 2 ], ui.get( items.quick_peek_restore ) )
-                ui.set( references.double_tap[ 2 ], ui.get( items.double_tap_restore ) )
-                last_restore_type = { quick_peek_restore, double_tap_restore }
-            end
-        end
-
-        if ideal_tick.should_reset then
-            ui.set( references.quick_peek[ 2 ], ui.get( items.quick_peek_restore ) )
-            ui.set( references.double_tap[ 2 ], ui.get( items.double_tap_restore ) )
-            ideal_tick.should_reset = false
-        end
-        return
-    end
-
-    ui.set( references.quick_peek[ 2 ], "Always on" )
-    ui.set( references.double_tap[ 2 ], "Always on" )
-
-    if includes( ui.get( items.ideal_tick_options ), "Freestanding" ) then
-        anti_aim.force_freestanding = true
-    end
-
-    if includes( ui.get( items.ideal_tick_options ), "Immunity" ) then
-        anti_aim.force_immunity = true
-    end
-
-    ideal_tick.active = true
-    ideal_tick.should_reset = true
+    return newR, newG, newB, newA
 end
 
-
-function doubletap_charged()
-        if not ui.get(references.double_tap[1]) or not ui.get(references.double_tap[2])  then
-        return false
-    end
-
-    if not entity.is_alive(entity.get_local_player()) or entity.get_local_player() == nil then
-        return
-    end
-
-    local weapon = entity.get_prop(entity.get_local_player(), "m_hActiveWeapon")
-    if weapon == nil then
-        return false
-    end
-
-    local next_attack = entity.get_prop(entity.get_local_player(), "m_flNextAttack") + 0.25
-    local next_ready = entity.get_prop(weapon, "m_flNextPrimaryAttack")
-    if next_ready == nil then
-        return
-    end
-
-    local next_primary_attack = next_ready + 0.5
-    if next_attack == nil or next_primary_attack == nil then
-        return false
-    end
-    return next_attack - globals.curtime() < 0 and next_primary_attack - globals.curtime() < 0
-end
-
-
-function anti_aim.grab_ping( ent )
-    local player_resource = entity.get_all( "CCSPlayerResource" )[ 1 ]
-    return entity.get_prop( player_resource, string.format( "%03d", ent ) )
-end
-
-function anti_aim.get_fakeduck_latency( ent )
-    local esp_data = entity.get_esp_data( ent )
-    local is_fakeducking = bit.band( esp_data.flags, bit.lshift( 1, 9 ) ) == 512
-
-    if not is_fakeducking then
-        return 0
-    end
-
-    local latency = client.latency( ) / 2
-    local simtime = entity.get_prop( ent, "m_flSimulationTime" )
-    local curtime = globals.curtime( )
-
-    local shot_delay = latency + curtime - simtime
-    shot_delay = 14 - ( time_to_ticks( shot_delay ) % 14 )
-
-    return ticks_to_time( shot_delay ) * 100
-end
-
-function anti_aim.extrapolate( ent, ticks )
-    local velocity = { entity.get_prop( ent, "m_vecVelocity" ) }
-    local origin = { entity.get_origin( ent ) }
-    local gravity = cvar.sv_gravity:get_float( )
-    local jump_impulse = cvar.sv_jump_impulse:get_float( )
-    local in_air = bit.band( entity.get_prop( ent, "m_fFlags" ), 1 ) == 0
-
-    for i=1, ticks do
-        if in_air then
-            velocity[ 3 ] = velocity[ 3 ] - ticks_to_time( gravity )
-        end
-
-        for j=1, #origin do
-            origin[ j ] = origin[ j ] + velocity[ j ] * globals.tickinterval( )
-        end
-    end
-
-    return origin
-end
-
-function anti_aim.handle_safety( )
-    local safety_triggers = ui.get( items.safety_triggers[ anti_aim.state ] )
-    local enemies = entity.get_players( true )
-
-    for i=1, globals.maxplayers( ) do
-        local target = i
-
-        if not entity.is_alive( target) or not entity.is_enemy( target ) then
-            goto continue
-        end
-
-        anti_aim.safe[ target ] = true
-
-        if #safety_triggers > 0 then
-            if includes( safety_triggers, "Dangerous enemy" ) then
-                local target_ping = anti_aim.grab_ping( target )
-                local danger_threshold = ui.get( items.danger_threshold[ anti_aim.state ] )
-                anti_aim.ping_threshold = math.floor( ( danger_threshold * ( anti_aim.max_ping_threshold - 5 ) ) / 100 )
-                anti_aim.ping_threshold = anti_aim.ping_threshold + 5
-
-                target_ping = target_ping + anti_aim.get_fakeduck_latency( target )
-
-                if target_ping <= anti_aim.ping_threshold then
-                    anti_aim.safe[ target ] = false
-                end
-            end
-
-            if includes( safety_triggers, "Unviable anti-aim" ) then
-                if anti_aim.attempting_choke or globals.chokedcommands( ) > 2 then
-                    anti_aim.safe[ target ] = false
-                end
-            end
-        end
-
-        ::continue::
-    end
-end
-
-function anti_aim.handle_state( )
-    if not ui.get( items.anti_aim ) then
-        return
-    end
-
-    local local_player = entity.get_local_player( )
-    local target = client.current_threat( )
-
-    local velocity = { entity.get_prop( local_player, "m_vecVelocity" ) }
-    local speed = math.sqrt( velocity[ 1 ] ^ 2 + velocity[ 2 ] ^ 2 )
-    local in_air = bit.band( entity.get_prop( local_player, "m_fFlags" ), 1 ) == 0
-
-    if in_air then
-        anti_aim.last_in_air = globals.tickcount( )
-    end
-
-    local landing = not in_air and globals.tickcount( ) - anti_aim.last_in_air < 4
-
-    local duck_amount = entity.get_prop( local_player, "m_flDuckAmount" )
-
-    local enemy_z_difference = 0
-
-    if target ~= nil then
-        local local_origin = { entity.get_origin( local_player ) }
-        local target_origin = { entity.get_origin( target ) }
-
-        enemy_z_difference = local_origin[ 3 ] - target_origin[ 3 ]
-    end
-
-    local conditions = {
-        [ 1 ] = true,
-        [ 2 ] = false,
-        [ 3 ] = speed <= 1.1 and not in_air,
-        [ 4 ] = speed > 1.1 and not in_air,
-        [ 5 ] = speed > 210 and not in_air,
-        [ 6 ] = duck_amount > 0 or ui.get( references.fake_duck ),
-        [ 7 ] = in_air or landing,
-        [ 8 ] = duck_amount > 0 and in_air,
-        [ 9 ] = enemy_z_difference > 64,
-        [ 10 ] = enemy_z_difference < -64,
-        [ 11 ] = ui.get( references.slow_motion[ 2 ] )
-    }
-
-    local condition_strings = {
-        [ 1 ] = "DEFAULT",
-        [ 2 ] = "SAFE",
-        [ 3 ] = "STAND",
-        [ 4 ] = "RUN",
-        [ 5 ] = "RUN+",
-        [ 6 ] = "CROUCH",
-        [ 7 ] = "IN AIR",
-        [ 8 ] = "IN AIR+",
-        [ 9 ] = "HIGH GROUND",
-        [ 10 ] = "LOW GROUND",
-        [ 11 ] = "SLOW"
-    }
-
-
-
-    for i=1, #conditions do
-        if ui.get( items.state_enabled[ i ] ) and conditions[ i ] then
-            anti_aim.state = i
-            anti_aim.current_state = condition_strings[i]
-        end
-    end
-
-    anti_aim.handle_safety( )
-
-    if target ~= nil and not anti_aim.safe[ target ] then
-        anti_aim.state = 2
-        return
-    end
-end
-
-function anti_aim.anti_backstab( )
-    anti_aim.backstab = false
-
-    if not ui.get( items.anti_aim ) or not includes( ui.get( items.anti_aim_options ), "Anti-backstab" ) then
-        return
-    end
-
-    local latency = client.latency( ) + ticks_to_time( 1 )
-    local resources = entity.get_all("CCSPlayerResource")
-
-    local enemies = entity.get_players( true )
-
-    for i=1, #enemies do
-        local enemy = enemies[ i ]
-        local enemy_latency = anti_aim.grab_ping( enemy ) / 1000
-        local weapon = entity.get_player_weapon( enemy )
-        local weapon_name = entity.get_classname( weapon )
-
-        if weapon_name ~= "CKnife" then
-            goto continue
-        end
-
-        local extrapolation = time_to_ticks( ( enemy_latency / 2 ) + ( latency / 2 ) ) + 1
-        local extrapolated_pos = anti_aim.extrapolate( enemy, extrapolation )
-
-        local server_pos = anti_aim.origin_list[ time_to_ticks( latency / 2 ) ]
-        local backtrack_pos = anti_aim.origin_list[ extrapolation + time_to_ticks( 0.2 ) ]
-
-        if server_pos == nil or backtrack_pos == nil then
-            goto continue
-        end
-
-        local server_diff = vector_diff( server_pos, extrapolated_pos )
-        local backtrack_diff = vector_diff( backtrack_pos, extrapolated_pos )
-
-        local server_delta = length_sqr( server_diff )
-        local backtrack_delta = length_sqr( backtrack_diff )
-
-        if server_delta < 20000 or backtrack_delta < 20000 then
-            anti_aim.choke_limit = 1
-            anti_aim.backstab = true
-            break
-        end
-
-        ::continue::
-    end
-end
-
-
-local flip_angle = 90
-local should_flip = false
-local should_swap = false
-    local new_anti_aim = {
-        [ "Enabled" ] = { references.anti_aim, true },
-        [ "Pitch" ] = { references.pitch, { "Down", 0 } },
-        [ "Yaw base" ] = { references.yaw_base, "At targets" },
-        [ "Yaw" ] = { references.yaw, { "180", 0 } },
-        [ "Yaw jitter" ] = { references.yaw_jitter, { "Off", 0 } },
-        [ "Body yaw" ] = { references.body_yaw, { "Static", 90 } },
-        [ "FS body yaw" ] = { references.freestanding_body_yaw, false }
-    }
-
-
-    local function modifyAntiAim(state, items)
-        local tickcount = globals.tickcount() % 30
-        local randomizeContortion = ui.get(items.randomize_contortion[state])
-        local jitterContort = ui.get(items.jitter_contort[state])
-        local jitterContortBodyYaw = ui.get(items.jitter_contort_bodyyaw[state])
-
-        local subTick = tickcount % 20
-        local staticYawAngles = {-90, 90}
-        local bodyYawSettings = {
-            ["Flip Static"] = {
-                condition = function(subTick) return subTick % 3 == 0 or subTick % 3 == 1 end,
-                setting = function(subTick) return {"Static", staticYawAngles[subTick%3+1]} end,
-                bodyYaw = function(subTick) return subTick % 3 == 0 and "CSC-" or "CSC+" end
-            },
-            ["Jitter"] = {
-                condition = function() return true end,
-                setting = function() return {"Jitter", 67} end,
-                bodyYaw = function() return "CJ" end
-            },
-            ["Off"] = {
-                condition = function() return true end,
-                setting = function() return {"Off", 0} end,
-                bodyYaw = function() return "O" end
-            }
-        }
-        if randomizeContortion and jitterContort then
-            for key, values in pairs(bodyYawSettings) do
-                if jitterContortBodyYaw == key and values.condition(subTick) then
-                    new_anti_aim["Body yaw"][2] = values.setting(subTick)
-                    anti_aim.body_yaw = values.bodyYaw(subTick)
-                    new_anti_aim[ "Pitch" ][ 2 ] = { "Custom", 85 }
-                    break
-                end
-            end
-        end
-
-        local config = {
-            {
-                condition = function(tickcount) return randomizeContortion and (tickcount % 20 == 12 or tickcount % 20 == 17 or tickcount % 20 == 1) end,
-                settingYaw = {"Center", jitterContortRange},
-                settingBodyYaw = {"Static", 142},
-                settingPitch = {"Custom", 83},
-                bodyYaw = "CJ"
-            },
-            {
-                condition = function(tickcount) return jitterContort and tickcount % 20 < 18 end,
-                settingYaw = {"Skitter", contortionRange},
-                settingBodyYaw = {"Jitter", 90},
-                settingPitch = {"Custom", 86},
-                bodyYaw = "SJ"
-            },
-            {
-                condition = function(tickcount) return jitterContort and (tickcount % 20 == 18 or tickcount % 20 == 19) end,
-                settingYaw = {"Offset", jitterContortRange},
-                settingBodyYaw = {"Static", 0},
-                settingPitch = {"Custom", 80},
-                bodyYaw = "OS"
-            }
-        }
-        for _, value in ipairs(config) do
-            if value.condition(tickcount) then
-                new_anti_aim["Yaw jitter"][2] = value.settingYaw
-                new_anti_aim[ "Body yaw" ][ 2 ] = value.settingBodyYaw
-                new_anti_aim[ "Pitch" ][ 2 ] = value.settingPitch
-                anti_aim.body_yaw = value.bodyYaw
-                break
-            end
-        end
-    end
-
-    syntech.setup_left_right = function(left, right)
-        local body_pos = entity.get_prop(entity.get_local_player(), 'm_flPoseParameter', 11) or 0
-        local body_yaw = math.max(-60, math.min(60, body_pos*120-60+0.5))
-
-        local state = body_yaw > 0 and 1 or -1
-        local side = state == 1 and left or right
-
-        return side
-    end
-
-
-function anti_aim.run( )
-    if not ui.get( items.anti_aim ) then
-        return
-    end
-
-    local flutter_strength = ui.get(items.flutter_strength[anti_aim.state])
-
-    local body_yaw = ui.get(items.contortion_body_yaw[anti_aim.state])
-
-    local state = anti_aim.state
-
-    anti_aim.stage = "Regular"
-
-
-
-    local yaw = 0
-
-    local current_anti_aim_type = ui.get( items.anti_aim_type[ state ] )
-
-    if includes( ui.get( items.anti_aim_options ), "Optimize leg movement" ) then
-        if includes( ui.get( items.anti_aim_options ), "Break leg movement" ) then
-            syntech.print( "You cannot use both \"Optimize leg movement\" and \"Break leg movement\" at the same time." )
-            client.exec( "play error" )
-        end
-        local velocity = { entity.get_prop( entity.get_local_player(), "m_vecVelocity" ) }
-        local should_slide = length( velocity ) < 150
-        ui.set( references.leg_movement, should_slide and  "Always slide" or "Never slide")
-
-    end
-
-    if ui.get(items.freestanding) and ui.get(items.freestand_key) then
-        if ui.get(items.freestanding_options) == "Default" then
-            goto nutsack
-        elseif ui.get(items.freestanding_options) == "Jitter" then
-            current_anti_aim_type = "Jitter"
-        elseif ui.get(items.freestanding_options) == "Static" then
-            current_anti_aim_type = "Static"
-        end
-    end
-    if includes(ui.get( items.anti_aim_options ), "Break leg movement" ) then
-        local legs_int = globals.tickcount() % 6
-
-        if legs_int <= 3 then
-            ui.set( references.leg_movement, "Always slide")
-        elseif legs_int > 3 then
-            ui.set( references.leg_movement, "Never slide")
-        end
-    end
-
-    if ui.get(items.safe_knife) and ui.get(items.safe_knife_options) == "Visible" then
-        local target = client.current_threat( )
-        local local_player = entity.get_local_player()
-        if target == nil then
-            goto continue
-        end
-        if not local_player or not entity.is_alive(local_player) then
-            goto continue
-        end
-        local in_air = bit.band( entity.get_prop( entity.get_local_player(), "m_fFlags" ), 1 ) == 0
-        local esp_data = entity.get_esp_data( target )
-        local is_visible = bit.band( esp_data.flags, 2048)
-        local weapon = entity.get_player_weapon( entity.get_local_player() )
-        local weapon_name = entity.get_classname( weapon )
-
-        if is_visible == 2048 and in_air and (weapon_name == "CKnife" or weapon_name == "CWeaponTaser") then
-            current_anti_aim_type = "Safe Knife"
-        end
-
-    elseif ui.get(items.safe_knife) and ui.get(items.safe_knife_options) == "Always" then
-
-        local local_player = entity.get_local_player()
-        local weapon = entity.get_player_weapon( local_player )
-        local weapon_name = entity.get_classname( weapon )
-        local in_air = bit.band( entity.get_prop( entity.get_local_player(), "m_fFlags" ), 1 ) == 0
-
-        if not local_player or not entity.is_alive(local_player) then
-            goto continue
-        end
-
-        if in_air and (weapon_name == "CKnife" or weapon_name == "CWeaponTaser") then
-            current_anti_aim_type = "Safe Knife"
-        end
-    end
-
-    ::continue::
-    ::nutsack::
-
-
-    local immunity_forced = globals.curtime( ) - anti_aim.last_force_defensive < 0.5
-
-    if includes( ui.get( items.anti_aim_options ), "Immunity flick" ) and anti_aim.in_defensive and not immunity_forced then
-        current_anti_aim_type = "Defensive"
-    elseif anti_aim.backstab then
-        current_anti_aim_type = "Backstab"
-    elseif state == 7 or state == 8 then
-        if ui.get( items.twist_in_air ) and globals.chokedcommands( ) < 3 and ui.get( references.double_tap[ 1 ] ) and ui.get( references.double_tap[ 2 ] ) then
-            current_anti_aim_type = "Twist"
-        end
-    end
-
-    if current_anti_aim_type == "Safe Knife" then
-        new_anti_aim[ "Body yaw" ][ 2 ] = { "Static", 0 }
-        new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Off", 25 }
-        new_anti_aim[ "Yaw" ][ 2 ] = { "180", 0 }
-
-    elseif current_anti_aim_type == "Static" then
-        new_anti_aim[ "Yaw" ][ 2 ] = { "180", 0 }
-        new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Off", 0 }
-        new_anti_aim[ "Body yaw" ][ 2 ] = { "Static", 0 }
-        anti_aim.body_yaw = "S"
-
-    elseif current_anti_aim_type == "Jitter" then
-
-
-
-
-        local left_yaw = ui.get(items.l_yaw_offset[state])
-        local right_yaw = ui.get(items.r_yaw_offset[state])
-
-
-
-
-        local default_jitter = ui.get(items.jitter_type [state ]) == "Default"
-        local slow_jitter = ui.get(items.jitter_type [state ]) == "Slow"
-        local static_body_yaw = ui.get(items.jitter_body_yaw [state ]) == "Static"
-        local no_desync_body_yaw = ui.get(items.jitter_body_yaw [state ]) == "No Desync"
-        local jitter_body_yaw = ui.get(items.jitter_body_yaw [state ]) == "Jitter"
-        local max_jitter_range = 0
-        if default_jitter then
-         max_jitter_range = 120
-        elseif slow_jitter then
-         max_jitter_range = 60
-        end
-        local jitter_range = math.floor( ( ui.get( items.jitter_strength[ state ] ) * max_jitter_range ) / 100 )
-        local tickcount2 = globals.tickcount() % 20
-        new_anti_aim[ "Body yaw" ][ 2 ] = { "Static", 0 }
-
-        if ui.get( items.prevent_logging[ state ] ) then
-            if tickcount2 < 10  and tickcount2 > 5 then
-                new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Skitter", 55 }
-                anti_aim.contortion_amount = jitter_range
-            end
-            anti_aim.stage = "Reset"
-        else
-            anti_aim.stage = "Jitter"
-        end
-
-        if default_jitter then
-            new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Center", jitter_range }
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Jitter", 55 }
-            new_anti_aim[ "Yaw" ][ 2 ] = { "180", 0 }
-        elseif slow_jitter then
-            if globals.tickcount() % ui.get(items.delay_swap[state]) == 1 then
-                should_swap = not should_swap
-            end
-            yaw = should_swap and left_yaw or right_yaw
-            new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Off", 22 }
-            new_anti_aim[ "Yaw" ][ 2 ] = { "180", yaw }
-        end
-
-
-        if static_body_yaw then
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Static", should_swap and 90 or -90 }
-        elseif no_desync_body_yaw then
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Off", 0 }
-        elseif jitter_body_yaw then
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Jitter", should_swap and 90 or -90 }
-        end
-
-
-    elseif current_anti_aim_type == "Contortion" then
-        local max_contortion_range = 0
-        local max_jitter_contort = 75
-        local randomize_contortion = ui.get(items.randomize_contortion[state])
-        local jitter_contort = ui.get(items.jitter_contort[state])
-
-        if body_yaw == "Jitter" then
-             max_contortion_range = 100
-             anti_aim.body_yaw = "J"
-        elseif body_yaw == "Opposite" then
-             max_contortion_range = 45
-             anti_aim.body_yaw = "O"
-        end
-        local contortion_range = math.floor( ( ui.get( items.contortion_strength[ state ] ) * max_contortion_range ) / 100 )
-        local jitter_contort_range = math.floor( ( ui.get( items.jitter_contort_strength[ state ] ) * max_jitter_contort ) / 100 )
-
-
-        if ui.get(items.prevent_prediction[state]) and globals.tickcount() % 30 >= 24 then
-            contortion_range = contortion_range - math.random(10, 25)
-            anti_aim.contortion_amount = contortion_range
-            anti_aim.stage = "Reset"
-        else
-            anti_aim.contortion_amount = contortion_range
-            anti_aim.stage = "Contortion"
-        end
-
-
-        local flutter_parameters = {
-            Low = {min = {-10, -2, -1}, max = {2, 10, 1}},
-            Medium = {min = {-20, -10, -5}, max = {10, 20, 5}},
-            High = {min = {-32, -23, -10}, max = {23, 32, 10}}
-        }
-
-        local flip_interval = math.random(20, 30)
-
-        if ui.get(items.flutter[state]) then
-            local flip_ticks = 3
-
-            if globals.tickcount() % flip_interval < 17 then
-                local new_yaw = 0
-                new_anti_aim["Yaw"][2] = {"180", new_yaw}
-                anti_aim.flutter_amount = new_yaw
-                anti_aim.stage = "Reset"
+local function traverse_table(tbl, prefix)
+    prefix = prefix or ""
+    local stack = {{tbl, prefix}}
+
+    while #stack > 0 do
+        local current = table.remove(stack)
+        local current_tbl = current[1]
+        local current_prefix = current[2]
+
+        for key, value in pairs(current_tbl) do
+            local full_key = current_prefix .. key
+            if type(value) == "table" then
+                table.insert(stack, {value, full_key .. "."})
             else
-                local index = (globals.tickcount() - 17) % flip_ticks + 1
-
-                if flutter_parameters[flutter_strength] then
-                    local flip_values = {
-                        math.random(flutter_parameters[flutter_strength].min[1], flutter_parameters[flutter_strength].max[1]),
-                        math.random(flutter_parameters[flutter_strength].min[2], flutter_parameters[flutter_strength].max[2]),
-                        math.random(flutter_parameters[flutter_strength].min[3], flutter_parameters[flutter_strength].max[3])
-                    }
-                    local new_yaw = flip_values[index]
-                    new_anti_aim["Yaw"][2] = {"180", new_yaw}
-                    anti_aim.flutter_amount = new_yaw
-                    anti_aim.stage = "Reset"
-                end
-            end
-        else
-            anti_aim.stage = "Contortion"
-        end
-
-
-
-        if body_yaw == "Jitter" then
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Jitter", 90 }
-            new_anti_aim["Yaw"][2] = {"180", 0}
-            modifyAntiAim(state, items)
-        elseif body_yaw == "Opposite" then
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Opposite", 90 }
-        end
-        new_anti_aim[ "Yaw jitter" ][ 2 ] = { "Skitter", contortion_range }
-
-
-        anti_aim.stage = "Contortion"
-    elseif current_anti_aim_type == "Defensive" then
-        new_anti_aim[ "Pitch" ][ 2 ] = { "Up", 0 }
-        new_anti_aim[ "Yaw" ][ 2 ] = { "Static", 69 }
-        anti_aim.stage = "Immunity"
-    elseif current_anti_aim_type == "Backstab" then
-        new_anti_aim[ "Pitch" ][ 2 ] = { "Custom", 0 }
-        new_anti_aim[ "Yaw" ][ 2 ] = { "180", 180 }
-        anti_aim.stage = "Anti-backstab"
-    elseif current_anti_aim_type == "Twist" then
-        if ui.get( items.twist_in_air_type ) == "Avoidance" then
-            local twist_angles = {
-                -90,
-                90,
-                -15,
-                180,
-                135,
-                -140,
-                92,
-                -92,
-                100
-            }
-
-            local pitch_angles = {
-                -89,
-                89,
-                -30,
-                30,
-                -66,
-                66,
-                48,
-                -48,
-                88
-            }
-            new_anti_aim[ "Yaw" ][ 2 ] = { "180", twist_angles[ client.random_int( 1, 9 ) ] }
-            new_anti_aim[ "Pitch" ][ 2 ] = { "Custom", pitch_angles[ client.random_int( 1, 9 ) ] }
-
-        else
-            local pitch_angles = {
-                -89,
-                89,
-                -30,
-                30,
-                -66,
-                66,
-                48,
-                -48,
-                88
-            }
-            new_anti_aim[ "Yaw" ][ 2 ] = { "Spin", globals.tickcount( ) % 42 > 32 and 65 or 75 }
-            new_anti_aim[ "Body yaw" ][ 2 ] = { "Static", globals.tickcount( ) % 32 > 16 and 90 or -90 }
-            new_anti_aim[ "Pitch" ][ 2 ] = { "Custom", pitch_angles[ client.random_int( 1, 9 ) ] }
-        end
-        anti_aim.stage = "Twist"
-
-    end
-
-    for item_name, item in pairs( new_anti_aim ) do
-        if type( item[ 2 ] ) ~= "table" then
-            ui.set( item[ 1 ], item[ 2 ] )
-        else
-            for i=1, #item[ 2 ] do
-                ui.set( item[ 1 ][ i ], item[ 2 ][ i ] )
+                -- Применяем ui.set_visible к каждому элементу
+                ui.set_visible(value, false) -- Здесь можно изменить параметр видимости на нужное значение
             end
         end
     end
 end
 
-function anti_aim.handle_keybinds( )
-    if not ui.get( items.anti_aim ) then
-        return
-    end
-
-    local should_freestand = anti_aim.force_freestanding
-
-    if not should_freestand and ui.get( items.freestanding ) and ui.get( items.freestand_key ) then
-        should_freestand = true
-    end
-
-    ui.set( references.freestanding[ 1 ], should_freestand )
-    ui.set( references.freestanding[ 2 ], should_freestand and "Always on" or "On hotkey" )
-
-    ui.set( references.edge_yaw, includes( ui.get( items.anti_aim_options ), "Edge yaw" ) )
-
-    anti_aim.force_freestanding = false
-end
-
-function anti_aim.immunity_detection( )
-    if not ui.get( items.anti_aim ) or not ui.get( references.double_tap[ 1 ] ) or not ui.get( references.double_tap[ 2 ] ) or ui.get( references.fake_duck ) then
-        anti_aim.in_defensive = false
-        anti_aim.old_simtime = 0
-        return
-    end
-
-    local simtime = entity.get_prop( entity.get_local_player( ), "m_flSimulationTime" )
-
-    if simtime == nil then
-        return
-    end
-
-    anti_aim.latency_list[ #anti_aim.latency_list + 1 ] = client.latency( )
-
-    while #anti_aim.latency_list > 128 do
-        table.remove( anti_aim.latency_list, 1 )
-    end
-
-    local highest_latency = 0
-
-    for i=1, #anti_aim.latency_list do
-        if anti_aim.latency_list[ i ] > highest_latency then
-            highest_latency = anti_aim.latency_list[ i ]
-        end
-    end
-
-    local server_simtime = simtime
-    local delta = server_simtime - anti_aim.old_simtime
-
-    if delta > 1 or delta < -1 then
-        anti_aim.old_simtime = simtime
-    end
-
-    if delta < 0 then
-        if not anti_aim.in_defensive then
-            anti_aim.defensive_duration = ( anti_aim.old_simtime - server_simtime ) - ( ticks_to_time( 1 ) + highest_latency )
-
-            if anti_aim.defensive_duration <= 0 then
-                return
-            end
-
-            if ui.get( items.debug_logs ) then
-                local potential_duration = math.floor( ( anti_aim.defensive_duration / ( anti_aim.old_simtime - simtime ) ) * 100 )
-                syntech.print( string.format( "Immunity detected [ duration: %st, potential: %s%% ]", time_to_ticks( anti_aim.defensive_duration ), potential_duration ) )
-                syntech.print( string.format( "[ delta: %f | predicted: %s | latency: %sms ]", delta, server_simtime, math.floor( highest_latency * 1000 ) ) )
-            end
-        end
-
-        anti_aim.in_defensive = true
-    else
-        anti_aim.old_simtime = server_simtime
-        anti_aim.in_defensive = false
-    end
-end
-
-function anti_aim.command_handling( cmd )
-    if not ui.get( items.anti_aim ) then
-        return
-    end
-
-    local local_player = entity.get_local_player( )
-
-    if anti_aim.stage == "Twist" or ui.get( items.force_immunity[ anti_aim.state ] ) then
-        anti_aim.force_immunity = true
-    end
-
-    if includes( ui.get( items.anti_aim_options ), "Desync on use" ) then
-        local is_defusing = entity.get_prop( local_player, "m_bIsDefusing" )
-        local is_grabbing_hostage = entity.get_prop( local_player, "m_bIsGrabbingHostage" )
-
-        if is_defusing ~= 1 and is_grabbing_hostage ~= 1 then
-            local weapon = entity.get_player_weapon( entity.get_local_player( ) )
-            local weapon_name = entity.get_classname( weapon )
-
-            if cmd.chokedcommands == 0 and weapon_name ~= "CC4" then
-                cmd.in_use = 0
-            end
-        end
-    end
-
-    if anti_aim.force_immunity then
-        anti_aim.last_force_defensive = globals.curtime( )
-        cmd.force_defensive = 1
-    end
-
-    ui.set( references.fake_lag[ 1 ], true )
-    ui.set( references.fake_lag[ 2 ], "Always on" )
-    ui.set( references.fake_lag_amount, "Dynamic" )
-    ui.set( references.fake_lag_variance, 0 )
-    ui.set( references.fake_lag_limit, anti_aim.choke_limit )
-
-    anti_aim.force_immunity = false
-end
-
-function syntech.animations()
-    local local_player = entity.get_local_player()
-    if not local_player or not entity.is_alive(local_player) then
-        return
-    end
-
-    local in_air = bit.band(entity.get_prop(local_player, "m_fFlags"), 1) == 0
-    self_index = entity_lib.get_local_player()
-
-    if ui.get(items.animations) == "Off" then
-        return
-    elseif ui.get(items.animations) == "Skydive mode" and in_air then
-        anim_layer = self_index:get_anim_overlay(0)
-        anim_layer_second = self_index:get_anim_overlay(6)
-        anim_layer.sequence = 232
-        anim_layer.cycle = 0.5
-        anim_layer_second.sequence = 232
-        anim_layer_second.cycle = 0.5
-    elseif ui.get(items.animations) == "Funny legs" and not in_air then
-        entity.set_prop(entity.get_local_player(), "m_flPoseParameter", 1, 7)
-        local my_animlayer = self_index:get_anim_overlay(6)
-        my_animlayer.weight = 1
-        entity.set_prop(self_index, "m_flPoseParameter", 0, 0)
-    elseif ui.get(items.animations) == "Funny legs always" then
-        entity.set_prop(entity.get_local_player(), "m_flPoseParameter", 1, 7)
-        local my_animlayer = self_index:get_anim_overlay(6)
-        my_animlayer.weight = 1
-        entity.set_prop(self_index, "m_flPoseParameter", 0, 0)
-    end
-end
-
-function anti_aim.lag_handling( )
-    if not ui.get( items.anti_aim ) then
-        return
-    end
-
-    local local_player = entity.get_local_player( )
-    local origin = { entity.get_origin( local_player ) }
-    local max_process_ticks = ui.get(references.sv_maxusrcmdprocessticks)
-    anti_aim.attempting_choke = true
-    local unchoke = false
-    local choke_limit = max_process_ticks - 1
-
-    if ui.get(references.fake_duck) then
-        choke_limit = 15
-    end
-
-    if not ui.get( references.fake_duck ) then
-        if ui.get( references.double_tap[ 1 ] ) and ui.get( references.double_tap[ 2 ] ) then
-            anti_aim.attempting_choke = false
-            unchoke = includes( ui.get( items.anti_aim_options ), "Prevent harmful fakelag" )
-        elseif ui.get( references.on_shot[ 1 ] ) and ui.get( references.on_shot[ 2 ] ) then
-            anti_aim.attempting_choke = false
-            unchoke = includes( ui.get( items.anti_aim_options ), "Prevent harmful fakelag" )
-        elseif includes( ui.get( items.anti_aim_options ), "Prevent harmful fakelag" ) then
-            local predicted_origin = anti_aim.extrapolate( local_player, max_process_ticks - 1 )
-
-            for i=1, 3 do
-                predicted_origin[ i ] = predicted_origin[ i ] - origin[ i ]
-            end
-
-            local predicted_delta = length_sqr( predicted_origin )
-
-            if predicted_delta <= 4096 and #anti_aim.origin_list >= 64 then
-                local new_origin = { }
-                for i=1, 3 do
-                    new_origin[ i ] = origin[ i ] - anti_aim.origin_list[ max_process_ticks - 1 ][ i ]
-                end
-
-                local delta = length_sqr( new_origin )
-
-                if delta <= 4096 then
-                    unchoke = true
-                end
-            end
-        end
-    end
-
-    if unchoke then
-        choke_limit = 1
-    end
-
-    anti_aim.choke_limit = choke_limit
-
-    table.insert( anti_aim.origin_list, 1, origin )
-
-    while #anti_aim.origin_list > 64 do
-        table.remove( anti_aim.origin_list, #anti_aim.origin_list )
-    end
-end
-
-
-local function on_player_hurt(e)
-    local local_player = entity.get_local_player()
-    local victim_userid, attacker_userid = e.userid, e.attacker
-    local victim_entindex, attacker_entindex = client.userid_to_entindex(victim_userid), client.userid_to_entindex(attacker_userid)
-
-    if entity.is_enemy(attacker_entindex) and victim_entindex == entity.get_local_player() then
-        anti_aim.local_damaged = true
-        client.delay_call(0.1, function() anti_aim.local_damaged = false end)
-    end
-end
-
-
-
-
-local function get_head_hitbox()
-    local local_player_index = entity.get_local_player()
-    local local_player_entity = entity_lib.get_local_player()
-    anti_aim.head_hitbox = {entity.hitbox_position(local_player_index, 0)}
-
-    local neck_position = vector(entity.hitbox_position(local_player_index, 1))
-    local positions_dif = head_position.z - neck_position.z
-    anti_aim.standing_height = map(positions_dif, 2.2, 4, 1, 0)
-end
-
-local function on_bullet_impact(e)
-    local shooter = client.userid_to_entindex(e.userid)
-    local local_player = entity.get_local_player()
-
-    if not entity.is_alive(entity.get_local_player()) or not entity.is_enemy(shooter) then
-        return
-    end
-    if anti_aim.local_damaged then return end
-    local ent = client.userid_to_entindex(e.userid)
-    if entity.is_enemy(ent) and not entity.is_dormant(ent) then
-
-
-        local shot_start_pos 	= vector(entity.get_prop(shooter, "m_vecOrigin"))
-        shot_start_pos.z 		= shot_start_pos.z + entity.get_prop(shooter, "m_vecViewOffset[2]")
-        local eye_pos			= vector(client.eye_position())
-        local shot_end_pos 		= vector(e.x, e.y, e.z)
-        local closest			= KaysFunction(shot_start_pos, shot_end_pos, eye_pos)
-
-        if closest < 35 and globals.curtime() > anti_aim.delay then
-            anti_aim.delay = globals.curtime() + 0.35
-            anti_aim.miss_counter_game = anti_aim.miss_counter_game + 1
-            anti_aim.miss_counter_round = anti_aim.miss_counter_round + 1
-        end
-    end
-end
-
-local function reset_brute_round()
-    anti_aim.delay = 0
-    anti_aim.miss_counter_round = 0
-    anti_aim.local_damaged = false
-end
-
-local function reset_brute_game()
-    anti_aim.delay = 0
-    anti_aim.miss_counter_game = 0
-    anti_aim.local_damaged = false
-end
-
-
-
-
-
-client.register_esp_flag( "T", 0, 255, 0, function( ent )
-    if not ui.get( items.master_switch ) or not ui.get( items.anti_aim ) or not ui.get( items.safety_flag ) then
-        return false
-    end
-
-    if entity.is_dormant( ent ) then
-        return true, "\aFFFFFF82T"
-    end
-
-    local target_safe = anti_aim.safe[ ent ]
-
-    if target_safe ~= nil and target_safe then
-        return true
-    else
-        return true, "\aFF0000FFT"
-    end
-end )
-
-local clan_tag = {
-    reset = false,
-    last_update = 0
-}
-
-function clan_tag.run( )
-    if not ui.get( items.clan_tag ) then
-        if clan_tag.reset then
-            local local_tag = entity.get_prop( entity.get_player_resource( ), "m_szClan", entity.get_local_player( ) )
-
-            if local_tag ~= nil and local_tag ~= "" then
-                client.set_clan_tag( "" )
-                if ui.get( items.debug_logs ) then
-                    syntech.print( "Resetting clan tag" )
-                end
+local function traverse_table_on(tbl, prefix)
+    prefix = prefix or ""
+    local stack = {{tbl, prefix}}
+
+    while #stack > 0 do
+        local current = table.remove(stack)
+        local current_tbl = current[1]
+        local current_prefix = current[2]
+
+        for key, value in pairs(current_tbl) do
+            local full_key = current_prefix .. key
+            if type(value) == "table" then
+                table.insert(stack, {value, full_key .. "."})
             else
-                clan_tag.reset = false
-                if ui.get( items.debug_logs ) then
-                    syntech.print( "Clan tag successfully reset" )
-                end
-            end
-        end
-        return
-    end
-
-    local updated = globals.tickcount( ) - clan_tag.last_update
-    if updated < 1 and math.abs( updated ) < 32 then
-        return
-    end
-
-    local tag_tick = globals.tickcount( ) + time_to_ticks( client.latency( ) / 2 )
-
-    client.set_clan_tag( tag_tick % 64 > 32 and "[ + syntech / ]" or "[ / syntech - ]" )
-
-    clan_tag.last_update = globals.tickcount( )
-
-    clan_tag.reset = true
-end
-
-local indicators = {
-    defensive_alpha = 0,
-    defensive_time = 0,
-    current_text = { "", "" },
-    ideal_text = { "", "" },
-    flip_text = { false, false },
-    last_text_update = { 0, 0 },
-    current_number = 0,
-    ideal_number = 0,
-    ['crosshair'] = {
-        ['alpha'] = 0,
-        ['scoped'] = 0,
-        ['values'] = {0, 0, 0, 0, 0, 0, 0},
-        ['doubletap_color'] = {r = 0 , g = 0 , b = 0 , a = 0},
-        ['default_dt'] = {r = 0, g = 0, b = 0, a = 0},
-        ['modern'] = {speed = 1, text_alpha = 0, text_alpha2 = 0, color = {r = 0 , g = 0 , b = 0 , a = 0}},
-        ['fake_anim'] = 0
-    }
-}
-
-indicators.run = function( )
-    local local_player = entity.get_local_player( )
-
-    if not entity.is_alive( local_player ) then
-        return
-    end
-
-    local aa_state = ui.get( items.anti_aim )
-
-    local sc_w, sc_h = client.screen_size( )
-
-    local target = client.current_threat( )
-    local target_name = "unavailable"
-    local target_safe = true
-    local target_danger = 0
-
-    if target ~= nil then
-        target_danger = 100 - math.floor( math.min( 1, anti_aim.grab_ping( target ) / anti_aim.max_ping_threshold ) * 100 )
-        target_name = entity.get_player_name( target )
-        if anti_aim.safe[ target ] ~= nil then
-            target_safe = anti_aim.safe[ target ]
-        end
-    end
-
-    if anti_aim.in_defensive or indicators.defensive_alpha ~= 0 then
-        if indicators.defensive_time == 0 then
-            indicators.defensive_time = globals.curtime( )
-        end
-
-        local defensive_amount = math.max( 0, math.min( 1, ( globals.curtime( ) - indicators.defensive_time ) / anti_aim.defensive_duration ) )
-
-        local indicator_offset = -50
-        local bar_w = 50
-        local bar_h = 2
-        local bar_offset = -10
-
-        local bar_x = sc_w / 2 - ( bar_w / 2 )
-        local bar_y = indicator_offset + bar_offset + sc_h / 2
-
-        local fade_in_speed = 4000
-        local fade_out_speed = 1000
-
-        if defensive_amount == 1 then
-            indicators.defensive_alpha = math.max( 0, indicators.defensive_alpha - ( globals.frametime( ) * fade_out_speed ) )
-        else
-            indicators.defensive_alpha = math.min( 255, indicators.defensive_alpha + ( globals.frametime( ) * fade_in_speed ) )
-        end
-
-        renderer.rectangle( bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2, 0, 0, 0, indicators.defensive_alpha )
-
-        renderer.rectangle( bar_x, bar_y, bar_w * defensive_amount, bar_h, 255, 255, 255, indicators.defensive_alpha )
-
-        renderer.text( sc_w / 2, indicator_offset + sc_h / 2, 255, 255, 255, indicators.defensive_alpha, "c-", 0, "IMMUNITY" )
-    else
-        indicators.defensive_time = 0
-        indicators.defensive_alpha = 0
-    end
-
-    if ideal_tick.active and ui.get(items.indicator_enable) == "Default" then
-        local indicator_offset = -20
-        local text_color = target_safe and "67BCFFFF" or "FF6779FF"
-
-        renderer.text( sc_w / 2, indicator_offset + sc_h / 2, 255, 255, 255, 255, "c-", 0, "IDEAL \a", text_color, "TICK" )
-    end
-
-
-
-    if ui.get( items.debug_panel ) then
-       local debug_strings = {
-            [ "State" ] = anti_aim.states[ anti_aim.state ]:lower( ),
-            [ "Choke limit" ] = anti_aim.choke_limit,
-            [ "Force immunity" ] = anti_aim.force_immunity,
-            [ "Anti-aim" ] = anti_aim.stage:lower( ),
-            [ "Target" ] = target_name:lower( ),
-            [ "Danger" ] = target_danger .. "%",
-        }
-
-        local debug_iter = 0
-        local string_offset = 15
-
-        for k, v in pairs( debug_strings ) do
-            renderer.text( 6, debug_iter * string_offset + sc_h / 2, 255, 255, 255, 255, nil, 0, string.format( "[ %s : %s ]", k, v ) )
-            debug_iter = debug_iter + 1
-        end
-    end
-if ui.get( items.anti_aim ) and ui.get(items.indicator_enable) == "Default" then
-
-    indicators.ideal_text[ 1 ] = target_safe and "safe" or "unsafe"
-
-    indicators.ideal_text[ 2 ] = anti_aim.states[ anti_aim.state ]:lower( )
-
-    indicators.ideal_number = 100 - target_danger
-
-    if indicators.ideal_number > indicators.current_number then
-        indicators.current_number = indicators.current_number + ( globals.frametime( ) * 150 )
-
-        if indicators.ideal_number < indicators.current_number then
-            indicators.current_number = indicators.ideal_number
-        end
-    elseif indicators.ideal_number < indicators.current_number then
-        indicators.current_number = indicators.current_number - ( globals.frametime( ) * 150 )
-
-        if indicators.ideal_number > indicators.current_number then
-            indicators.current_number = indicators.ideal_number
-        end
-    end
-
-    for i=1, 2 do
-        if indicators.current_text[ i ] ~= indicators.ideal_text[ i ] then
-            if globals.curtime( ) - indicators.last_text_update[ i ] > 0.02 then
-                if indicators.current_text[ i ]:len( ) <= 0 or indicators.flip_text[ i ] then
-                    indicators.current_text[ i ] = indicators.ideal_text[ i ]:sub( indicators.ideal_text[ i ]:len( ) - indicators.current_text[ i ]:len( ) )
-                    indicators.flip_text[ i ] = true
-                else
-                    indicators.current_text[ i ] = indicators.current_text[ i ]:sub( 1, -2 )
-                end
-                indicators.last_text_update[ i ] = globals.curtime( )
-            end
-        else
-            indicators.flip_text[ i ] = false
-        end
-    end
-
-
-
-       local fade_length = 2
-        local fade_time = globals.curtime( ) % fade_length
-        local factor = fade_time > fade_length / 2 and fade_length - fade_time or fade_time
-    local white, light_blue = {255, 255, 255}, {179,215,255}
-     local lerped_color = rgb_to_hex( table.unpack( syntech.lerp_color( white, light_blue, factor ) ) )
-
-
-local fade_length = 2
-local fade_time = globals.curtime() % fade_length
-
-local factor = fade_time > fade_length / 2 and fade_length - fade_time or fade_time
-
-local red, yellow, green = { 255, 0, 0 }, { 255, 255, 0 }, { 0, 255, 0 }
-local lerped_color = "00FF00FF"
-
-if anti_aim.standing_height ~= 1 then
-print(tostring(anti_aim.standing_height))
-end
-if anti_aim.standing_height <= 0.6 then
-    lerped_color = rgb_to_hex(
-        red[1] + (yellow[1] - red[1]) * (0.6 - anti_aim.standing_height) / 0.6,
-        red[2] + (yellow[2] - red[2]) * (0.6 - anti_aim.standing_height) / 0.6,
-        red[3] + (yellow[3] - red[3]) * (0.6 - anti_aim.standing_height) / 0.6,
-        255
-    )
-elseif anti_aim.standing_height < 0.85 then
-    lerped_color = rgb_to_hex(
-        red[1] + (yellow[1] - red[1]) * (0.85 - anti_aim.standing_height) / 0.25,
-        red[2] + (yellow[2] - red[2]) * (0.85 - anti_aim.standing_height) / 0.25,
-        red[3] + (yellow[3] - red[3]) * (0.85 - anti_aim.standing_height) / 0.25,
-        255
-    )
-elseif anti_aim.standing_height < 0.9 then
-    lerped_color = rgb_to_hex(
-        yellow[1] + (green[1] - yellow[1]) * (anti_aim.standing_height - 0.85) / 0.05,
-        yellow[2] + (green[2] - yellow[2]) * (anti_aim.standing_height - 0.85) / 0.05,
-        yellow[3] + (green[3] - yellow[3]) * (anti_aim.standing_height - 0.85) / 0.05,
-        255
-    )
-else
-    lerped_color = rgb_to_hex(green[1], green[2], green[3], 255)
-end
-
-
-     if includes( ui.get( items.safety_triggers[ anti_aim.state ]), "Dangerous enemy") then
-       renderer.text( sc_w / 2, sc_h / 2 + 50, 255, 255, 255, 255, "c", 0, string.format( "%s%% / %s / %s", math.floor( indicators.current_number ), indicators.current_text[ 1 ], indicators.current_text[ 2 ] ) )
-     else
-        renderer.text( sc_w / 2, sc_h / 2 + 50, 255, 255, 255, 255, "c", 0, "\a", lerped_color, indicators.current_text[ 2 ])
-     end
-    end
-
-
-    if ui.get(items.indicator_enable) == "Default" then
-    local animation_length = 1
-    local animation_speed = 0.05
-    local animation_time = globals.curtime( ) % animation_length
-
-    local text = "dev"
-    local animated_text = {
-        "!%>",
-        "d&^",
-        "de#",
-    }
-
-    for i=1, #animated_text do
-        if animation_time < i * animation_speed then
-            text = animated_text[ i ]
-            break
-        end
-    end
-
-    local fade_length = 2
-    local fade_time = globals.curtime( ) % fade_length
-    local factor = fade_time > fade_length / 2 and fade_length - fade_time or fade_time
-
-    local first_color, second_color = { 255, 165, 165 }, { 165, 165, 255 }
-    local blue_color, light_purple_color = {112, 171, 224}, { 195, 166, 247}
-    local lerped_color = rgb_to_hex( table.unpack( syntech.lerp_color( first_color, second_color, factor ) ) )
-
-    local lerped_color_state = rgb_to_hex( table.unpack( syntech.lerp_color( blue_color, light_purple_color, factor ) ) )
-
-    renderer.text( sc_w / 2, sc_h / 2 + 37, 255, 255, 255, 255, "cb", 0, "syntech.\a", lerped_color, text )
-    if ui.get(items.flutter[anti_aim.state]) then
-    renderer.text( sc_w / 2, sc_h / 2 + 65, 255, 255, 255, 255, "c", 0, string.format("[ %s:%s:%s ]", anti_aim.flutter_amount, anti_aim.contortion_amount, anti_aim.body_yaw ))
-    else
-        renderer.text( sc_w / 2, sc_h / 2 + 65, 255, 255, 255, 255, "c", 0, string.format("[%s:%s ]",  anti_aim.contortion_amount, anti_aim.body_yaw ))
-    end
-elseif ui.get(items.indicator_enable) == "Modern" then
-    local screen = {client.screen_size()}
-    local x_offset, y_offset = screen[1], screen[2]
-    local x, y =  x_offset/2,y_offset/2
-    local v = indicators['crosshair']
-    local text_size_x , text_size_y = renderer.measure_text(nil,"syntech [BETA]")
-    local r,g,b = ui.get(items.main_color)
-    local r1,g1,b1 = ui.get(items.second_color)
-    local simple_gradient = syntech.alt_gradient_text(r,g,b,255 * v['alpha'], r1,g1,b1, 255 * v['alpha'],'syntech [BETA]')
-
-    local b_yaw = entity.get_prop(entity.get_local_player(), "m_flPoseParameter", 11) * 1.3
-    v['alpha'] = animate.new(v['alpha'],1,0, ui.get(items.indicator_enable) == "Modern")
-    if v['alpha'] < 0.01 then return end
-    local is_scoped = entity.get_prop(entity.get_player_weapon(entity.get_local_player()), "m_zoomLevel" ) == 1 or entity.get_prop(entity.get_player_weapon(entity.get_local_player()), "m_zoomLevel" ) == 2
-    local modifier = entity.get_prop(entity.get_local_player(), "m_flVelocityModifier") ~= 1
-    local c1,c2,c3,c4 = ui.get(items.default_colors)
-    v['default_dt'] = syntech.lerp_color(v['default_dt'], {r = c1 , g = c2, b = c3, a = c4}, {r = 255 , g = 102,b = 102,a = 0}, ui.get(references.double_tap[1]) and doubletap_charged())
-    if b_yaw then
-        b_yaw = math.abs(map(b_yaw, 0, 1, -60, 60))
-        b_yaw = math.max(0, math.min(57, b_yaw))
-        body_yaw_store = b_yaw / 48
-    end
-    v['scoped'] = animate.new(v['scoped'],1,0,is_scoped)
-
-
-    local r1,g1,b1 = ui.get(items.second_color)
-    local main_gradient = syntech.alt_gradient_text(r,g,b,255 * v['alpha'], r1,g1,b1, 255 * v['alpha'],'syntech.beta')
-    local text_sizex, text_sizey = renderer.measure_text('-','syntech.beta')
-    local vx, vy, vz = entity.get_prop(entity.get_local_player(), "m_vecVelocity")
-    local velocity = math.sqrt(vx ^ 2 + vy ^ 2)
-    v['modern'].text_alpha = animate.new_notify(v['modern'].text_alpha,1,0,velocity > 30)
-    v['modern'].text_alpha2 = animate.new_notify(v['modern'].text_alpha2,1,0,velocity < 30)
-    v['modern'].speed = animate.new_notify(v['modern'].speed,velocity)
-
-    renderer.text(x  + 2 + math.floor(34 * v['scoped']), y + 18, 255, 255, 255, 255 * v['alpha'], 'c-', 0, main_gradient)
-
-    if v['modern'].speed > text_sizex + 3 then
-        v['modern'].speed = text_sizex + 3
-    end
-
-    renderer.text(x  + 2 + math.floor(34 * v['scoped']), y + 16 + text_sizey, 255, 255, 255, 255 * v['alpha'], 'c-', 0, anti_aim.current_state)
-     v['doubletap_color'] = animate.color_lerp(v['doubletap_color'], {r = r1, g = g1, b = b1, a = 255}, {r = 255 , g = 0,b = 0,a = 255}, ui.get(references.double_tap[1]) and ui.get(references.double_tap[2]) and doubletap_charged())
-    local offset = 0
-
-    local keys = {
-        [1] = {
-            ['condition'] = ui.get(items.freestanding) and ui.get(items.freestand_key),
-            ['text'] = 'FS',
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-
-        [2] = {
-            ['condition'] = ui.get(references.force_baim),
-            ['text'] = 'BA',
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-
-        [3] = {
-            ['condition'] = ui.get(references.force_safepoint),
-            ['text'] = 'SP',
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-        [4] = {
-            ['condition'] = ui.get(references.min_damage_override[2]),
-            ['text'] = string.format('%s', ui.get(references.min_damage_override[3])),
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-        [5] = {
-            ['condition'] = ui.get(items.ideal_tick) and ui.get(items.ideal_tick_key),
-            ['text'] = 'IT',
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-
-        [6] = {
-            ['condition'] = ui.get(references.on_shot[1]) and ui.get(references.on_shot[2]),
-            ['text'] = 'HS',
-            ['color'] = {r1,g1,b1,255 * v['alpha']}
-        },
-
-        [7] = {
-            ['condition'] = ui.get(references.double_tap[1]) and ui.get(references.double_tap[2]),
-            ['text'] = 'DT',
-            ['color'] = {v['doubletap_color'].r, v['doubletap_color'].g, v['doubletap_color'].b, 255 * v['alpha']}
-        },
-
-    }
-
-    for k, items in pairs(keys) do
-        local flags = 'c-'
-        local text_width , text_height = renderer.measure_text(flags,items['text'])
-        local key = items['condition'] and 1 or 0
-
-        v['values'][k] = animate.new(v['values'][k],key)
-        if k == 2 then
-            offset = offset + 1
-        end
-
-        local x , y = x + math.floor(35 * v['scoped']) -  text_sizex/2 + 6, y + 34
-
-        renderer.text(x + math.floor(offset * v['values'][k]), y, items['color'][1],items['color'][2],items['color'][3],items['color'][4] * v['values'][k], flags, text_width * v['values'][k] + 3, items['text'])
-        offset = offset + math.floor(13 * v['values'][k])
-    end
-
-        else
-            local fade_length = 2
-            local fade_time = globals.curtime( ) % fade_length
-            local factor = fade_time > fade_length / 2 and fade_length - fade_time or fade_time
-
-            local first_color, second_color = { 255, 255, 255 }, { 255, 0, 0 }
-            local lerped_color = rgb_to_hex( table.unpack( syntech.lerp_color( first_color, second_color, factor ) ) )
-            local syntech_watermark = syntech.gradient_text({ 239, 92, 168, 255}, {255, 111, 240, 255},
-    "discord.gg/syntech")
-            renderer.text(sc_w / 2, sc_h - 30, 255, 255, 255, 255, "cb+", 0, syntech_watermark)
-        end
-
-end
-
-function syntech.label_handling( )
-    local animation_length = 1
-    local animation_speed = 0.07
-    local animation_time = globals.curtime( ) % animation_length
-
-    local text = "dev"
-    local animated_text = {
-        "!%>",
-        "d&^",
-        "de#",
-    }
-
-    for i=1, #animated_text do
-        if animation_time < i * animation_speed then
-            text = animated_text[ i ]
-            break
-        end
-    end
-
-    local fade_length = 2
-    local fade_time = globals.curtime( ) % fade_length
-    local factor = fade_time > fade_length / 2 and fade_length - fade_time or fade_time
-
-    local first_color, second_color = { 255, 165, 165 }, { 165, 165, 255 }
-    local lerped_color = rgb_to_hex( table.unpack( syntech.lerp_color( first_color, second_color, factor ) ) )
-
-    ui.set( items.master_switch_label, string.format( "syntech.\a%s%s", lerped_color, text ) )
-
-    local visuals_text = syntech.gradient_text({ 239, 92, 168, 255}, {91, 111, 240, 255},
-    "Visuals")
-    local fake_lag_text = syntech.gradient_text( { 255, 130, 130, 255 }, { 150, 150, 255, 255 },
-        "Fake lag info" )
-    local fake_lag_info_text = syntech.gradient_text( { 255, 130, 130, 255 }, { 150, 150, 255, 255 },
-        string.format( "[ choke state: %s/%s ]", anti_aim.choke_limit, anti_aim.attempting_choke ) )
-
-    ui.set( items.visuals_label, visuals_text)
-   ui.set( items.fake_lag_label, fake_lag_text )
-    ui.set( items.fake_lag_label_info, fake_lag_info_text )
-
-    for i=1, #items.contortion_modifers_label do
-        local contortion_modifers_text = syntech.gradient_text( { 221, 154, 248, 255 }, { 215, 128, 249, 255 },
-        "Contortion Modifiers" )
-        ui.set( items.contortion_modifers_label[i], contortion_modifers_text)
-    end
-end
-
-function syntech.console_handling( cmd )
-    if cmd == "update log" then
-        client.exec( "clear" )
-        syntech.print( "- Update log [BETA]" )
-        for i=1, #syntech.updates.beta do
-            syntech.print( syntech.updates.beta[ i ] )
-        end
-        syntech.print( " " )
-        syntech.print( "- Update log [LIVE]" )
-        for i=1, #syntech.updates.live do
-            syntech.print( syntech.updates.live[ i ] )
-        end
-    end
-end
-
-function syntech.reset_data( )
-    indicators.defensive_time = 0
-    indicators.defensive_alpha = 0
-    anti_aim.last_force_defensive = 0
-    anti_aim.old_simtime = 0
-    anti_aim.latency_list = { }
-    anti_aim.in_defensive = false
-    anti_aim.defensive_duration = 0
-    anti_aim.safe = { }
-    anti_aim.origin_list = { }
-    anti_aim.miss_counter_round = 0
-    indicators.current_text = { "", "" }
-    indicators.ideal_text = { "", "" }
-    indicators.flip_text = { false, false }
-    indicators.last_text_update = { 0, 0 }
-    indicators.current_number = 0
-    indicators.ideal_number = 0
-end
-
-function syntech.on_unload( )
-    if ui.get( items.clan_tag ) then
-        client.set_clan_tag( "" )
-    end
-    reset_brute_game()
-    reset_brute_round()
-
-    ui.set( items.master_switch, false )
-end
-
-local configs = {
-    names = { "Alpha", "Bravo", "Charlie" },
-    web_configs = {
-        [ "Beta" ] = "https://raw.githubusercontent.com/vekeee/luas/main/syntech-beta-cfg.txt",
-        [ "Live" ] = "https://raw.githubusercontent.com/vekeee/luas/main/syntech-live-cfg.txt"
-    },
-    current = nil
-}
-
-function configs.grab( )
-    local config_array = { }
-
-    for var, item in pairs( items ) do
-        if item == items.ideal_tick_key or item == items.freestand_key then
-            goto continue
-        end
-
-        if type( item ) ~= "table" then
-            config_array[ var ] = ui.get( item )
-        else
-            config_array[ var ] = { }
-            for i=1, #item do
-                config_array[ var ][ i ] = ui.get( item[ i ] )
-            end
-        end
-
-        ::continue::
-    end
-
-    return config_array
-end
-
-function configs.apply( new_config )
-    for var, item in pairs( new_config ) do
-        if type( item ) ~= "table" or items[ var ] == items.anti_aim_options or items[ var ] == items.ideal_tick_options then
-            ui.set( items[ var ], item )
-        else
-            for i=1, #item do
-                ui.set( items[ var ][ i ], item[ i ] )
+                -- Применяем ui.set_visible к каждому элементу
+                ui.set_visible(value, true) -- Здесь можно изменить параметр видимости на нужное значение
             end
         end
     end
 end
-
-function configs.save( )
-    if database.read( "syntech" ) == nil then
-        local config_array = { }
-
-        for i=1, #configs.names do
-            config_array[ configs.names[ i ] ] = " "
-        end
-
-        database.write( "syntech", config_array )
-    end
-
-    local new_config = configs.grab( )
-
-    local config_string = json.stringify( new_config )
-    config_string = base64.encode( config_string )
-
-    local current_database = database.read( "syntech" )
-    current_database[ ui.get( configs.current ) ] = config_string
-
-    database.write( "syntech", current_database )
-    client.exec( "play ui\\csgo_ui_store_select" )
-    syntech.print( "Successfully saved config" )
-end
-
-function configs.load( )
-    local config_string = database.read( "syntech" )[ ui.get( configs.current ) ]
-    config_string = base64.decode( config_string )
-
-    local new_config = { }
-    if not pcall( json.parse, config_string ) then
-        syntech.print( "Failed to load config, ensure that it's not empty!" )
-        client.exec( "play ui\\menu_invalid" )
-        return
-    end
-
-    new_config = json.parse( config_string )
-
-    configs.apply( new_config )
-    client.exec( "play ui\\csgo_ui_store_select" )
-    syntech.print( "Successfully loaded config" )
-end
-
-function configs.export( )
-    local new_config = configs.grab( )
-
-    local config_string = json.stringify( new_config )
-    config_string = base64.encode( config_string )
-
-    clipboard.set( config_string )
-    client.exec( "play ui\\csgo_ui_store_select" )
-    syntech.print( "Successfully saved config to clipboard. ")
-end
-
-function configs.import( )
-    local config_string = base64.decode( clipboard.get( ) )
-    local new_config = json.parse( config_string )
-
-    configs.apply( new_config )
-    client.exec( "play ui\\csgo_ui_store_select" )
-    syntech.print( "Successfully imported config" )
-end
-
-function configs.import_from_web( )
-    syntech.print( "Loading config from web" )
-    client.exec( "play ui\\panorama\\itemtile_click_02" )
-
-    client.delay_call( 0.4, function( )
-        http.get( configs.web_configs[ ui.get( configs.web_config_name ) ], function( success, response)
-            if not success or response.status ~= 200 then
-                syntech.print( "Failed to import the config from web, ensure your ISP allows access to github!" )
-                client.exec( "play ui\\menu_invalid" )
-                return
-            end
-
-            local config_string = response.body:sub( 1, -2 )
-            config_string = base64.decode( config_string )
-
-            local new_config = { }
-            if not pcall( json.parse, config_string ) then
-                syntech.print( "Failed to load config, ensure that it's not empty!" )
-                client.exec( "play ui\\menu_invalid" )
-                return
-            end
-
-            new_config = json.parse( config_string )
-
-            configs.apply( new_config )
-            client.exec( "play ui\\csgo_ui_store_select" )
-            syntech.print( "Successfully loaded config from web" )
-        end )
-    end )
-end
-
-items.display_configs = syntech.new_menu_item( ui.new_checkbox, "Display configs", "Fake Lag" )
-
-configs.current = ui.new_combobox( "AA", "Anti-aimbot angles", "Current config", table.unpack( configs.names ) )
-configs.save_button = ui.new_button( "AA", "Anti-aimbot angles", "Save", configs.save )
-configs.load_button = ui.new_button( "AA", "Anti-aimbot angles", "Load", configs.load )
-configs.import_button = ui.new_button( "AA", "Anti-aimbot angles", "Import", configs.import )
-configs.export_button = ui.new_button( "AA", "Anti-aimbot angles", "Export", configs.export )
-configs.web_config_name = ui.new_combobox( "AA", "Anti-aimbot angles", "Web config", "Beta", "Live" )
-configs.import_web_config = ui.new_button( "AA", "Anti-aimbot angles", "Import config from web", configs.import_from_web )
-
-
-local entry = {
-    bound_events = {
-        [ "setup_command" ] = { anti_aim.command_handling, ideal_tick.run, anti_aim.handle_keybinds},
-        [ "net_update_end" ] = { anti_aim.immunity_detection, anti_aim.lag_handling, anti_aim.anti_backstab },
-        [ "run_command" ] = { anti_aim.handle_state, anti_aim.run },
-        [ "round_start" ] = { syntech.reset_data },
-        [ "cs_game_disconnected" ] = { syntech.reset_data },
-        [ "paint" ] = { indicators.run, clan_tag.run },
-        [ "shutdown" ] = { syntech.on_unload },
-        [ "pre_render" ] = {syntech.animations },
-
-    },
-    hidden_items = {
-        references.anti_aim,
-        references.pitch,
-        references.yaw_base,
-        references.yaw,
-        references.yaw_jitter,
-        references.body_yaw,
-        references.freestanding_body_yaw,
-        references.edge_yaw,
-        references.freestanding,
-        references.roll,
-        references.fake_lag,
-        references.fake_lag_amount,
-        references.fake_lag_variance,
-        references.fake_lag_limit
-    },
-    aa_hidden_items = {
-        references.yaw_base
-    },
-    initialized = false
-}
-
-function entry.ghetto_fix( )
-    local state = ui.get( items.master_switch )
-
-    for i=1, #entry.hidden_items do
-        local item = entry.hidden_items[ i ]
-        if type( item ) ~= "table" then
-            ui.set_visible( item, not state )
-        else
-            for j=1, #item do
-                ui.set_visible( item[ j ], not state )
-            end
-        end
-    end
-
-    local aa_state = ui.get( items.anti_aim )
-    if not state then
-        aa_state = false
-    end
-    for i=1, #entry.aa_hidden_items do
-        local item = entry.aa_hidden_items[ i ]
-        if type( item ) ~= "table" then
-            ui.set_visible( item, not aa_state )
-        else
-            for j=1, #item do
-                ui.set_visible( item[ j ], not aa_state )
-            end
-        end
-    end
-end
-
-entry.update_visibility = function( )
-    local state = ui.get( items.master_switch )
-    local display_configs = ui.get( items.display_configs )
-
-    for k, v in pairs(configs) do
-        if type( v ) == "number" then
-            ui.set_visible( v, state and display_configs )
-        end
-    end
-
-    ui.set( items.state_enabled[ 1 ], true )
-    ui.set( items.state_enabled[ 2 ], true )
-
-    local iter = 0
-
-    for _, item in pairs( items ) do
-        if item == items.master_switch or item == items.master_switch_label then
-            goto continue
-        end
-
-        if type( item ) ~= "table" then
-            if not entry.initialized then
-                ui.set_callback( item, entry.update_visibility )
-            end
-
-            if item == items.display_configs then
-                ui.set_visible( item, state )
-            else
-                ui.set_visible( item, state and not display_configs )
-            end
-        else
-            for i=1, #item do
-                if not entry.initialized then
-                    ui.set_callback( item[ i ], entry.update_visibility )
-                end
-
-                ui.set_visible( item[ i ], state and not display_configs )
-            end
-        end
-
-        ::continue::
-        iter = iter + 1
-    end
-
-    if not entry.initialized then
-        syntech.print( "Handled ", iter, " menu items" )
-    end
-
-    for item, conditions in pairs( syntech.conditional_items ) do
-        if type( item ) ~= "table" then
-            for i=1, #conditions do
-                if ui.get( conditions[ i ][ 1 ] ) ~= conditions[ i ][ 2 ] then
-                    ui.set_visible( item, false )
-                    break
-                end
-            end
-        else
-            for i=1, #item do
-                for j=1, #conditions do
-                    if ui.get( conditions[ j ][ 1 ] ) ~= conditions[ j ][ 2 ] then
-                        ui.set_visible( item[ i ], false )
-                        break
-                    end
-                end
-            end
-        end
-    end
-
-    ui.set_visible( items.safety_triggers[ 2 ], false )
-    ui.set_visible( items.danger_threshold[ 2 ], false )
-
-    entry.initialized = true
-end
-
-entry.initialize = function( )
-    local set_event_callback = ui.get( items.master_switch ) and client.set_event_callback or client.unset_event_callback
-
-    local iter = 0
-
-    for event, functions in pairs( entry.bound_events ) do
-        for i=1, #functions do
-            set_event_callback( event, functions[ i ] )
-            iter = iter + 1
-        end
-    end
-
-    if not entry.initialized then
-        syntech.print( "Allocated ", iter, " events" )
-    end
-
-    ui.set_callback( items.master_switch, entry.initialize )
-    entry.update_visibility( )
-end
-
-
-client.exec( "clear" )
-syntech.print( "Beginning initialization" )
-
-local db_string = "https://google.com"
-
-http.get( db_string, function( success, response )
-    syntech.print( "Connected to the security server" )
-    entry.initialize( )
-
-    client.set_event_callback( "paint_ui", syntech.label_handling )
-    client.set_event_callback( "paint_ui", entry.ghetto_fix )
-    client.set_event_callback( "console_input", syntech.console_handling )
-    client.set_event_callback( "shutdown", entry.ghetto_fix )
-
-    syntech.print( "Type 'update log' into console to see the latest updates!" )
-    syntech.print( "syntech has been loaded [ version: beta ]" )
-    client.exec( "play ui\\mm_success_lets_roll" )
-end )
