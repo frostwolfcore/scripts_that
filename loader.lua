@@ -2,8 +2,8 @@ local http = require("gamesense/http")
 local vector = require("vector")
 local pui = require('gamesense/pui')
 
-local owner = "luvettee"
-local repo = "meowmrrpmrrp"
+local owner = "frostwolfcore"
+local repo = "scripts_that"
 local branch = "main"
 local subfolder = "luas"    
 
