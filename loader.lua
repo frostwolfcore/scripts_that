@@ -7,7 +7,7 @@ local repo = "scripts_that"
 local branch = "main"
 local subfolder = "luas"    
 
-local raw_url = string.format("https://raw.githubusercontent.com/frostwolfcore/scripts_that/main/luas/femloader.lua", owner, repo, branch, subfolder)
+local raw_url = string.format("https://raw.githubusercontent.com/frostwolfcore/scripts_that/refs/heads/main/loader.lua", owner, repo, branch, subfolder)
 local api_url = string.format("https://api.github.com/repos/frostwolfcore/scripts_that/contents/luas?ref=main", owner, repo, subfolder, branch)
 
 -- ♡ cute pink theme
