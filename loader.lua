@@ -8,7 +8,7 @@ local branch = "main"
 local subfolder = "luas"    
 
 local raw_url = string.format("https://raw.githubusercontent.com/frostwolfcore/scripts_that/refs/heads/main/loader.lua", owner, repo, branch, subfolder)
-local api_url = string.format("https://api.github.com/repos/frostwolfcore/scripts_that/contents/luas?ref=main", owner, repo, subfolder, branch)
+local api_url = string.format("https://raw.githubusercontent.com/frostwolfcore/scripts_that/refs/heads/main/luas/", owner, repo, subfolder, branch)
 
 -- ♡ cute pink theme
 local menu_r, menu_g, menu_b = 255, 150, 180
